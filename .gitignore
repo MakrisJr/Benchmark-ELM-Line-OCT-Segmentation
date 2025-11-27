@@ -6,6 +6,7 @@ data_original/
 runs/
 checkpoint/
 result/
+elm-results/
 
 # ignore python cache files
 __pycache__/
@@ -13,3 +14,4 @@ __pycache__/
 
 
 *logs*
+*.pth
