@@ -1,0 +1,49 @@
+# suggestions
+
+High‑level diagnosis (why lines are thicker and the center is missed)
+
+    Label / preprocessing mismatch: if GT lines are 1px thick but you blur/upsample labels or use interpolation when building batches, predicted responses tend to be thicker. Also check if your binary GT was dilated anywhere.
+    Loss choice / class imbalance: thin structures have tiny foreground volume — vanilla Dice or BCE can make the network “pad” predictions to increase overlap, producing thicker bands. The model also tends to hallucinate continuity across a break (macular hole) unless explicitly penalized for predicting through the hole.
+    Thresholding / sigmoid calibration: model outputs are probabilistic; threshold selection affects apparent thickness. Low thresholds → thicker predictions.
+    Model smoothing and receptive field: 3D convolutions + ReLU encourage spatially smooth predictions; the network may “bridge” the hole because the context on either side favors continuity.
+    Alignment issues: you already handled output_padding for depth, but double-check H/W alignment at each concat (off-by-one cropping/padding can blur the boundary).
+    Data distribution: if few examples with central holes, model underfits that case and simply interpolates the membrane through the hole.
+
+What to try (ranked)
+
+    Verify labels & preprocessing
+
+    Visualize a few training inputs + raw GT (no augmentation, no resizing). If GT contains thickness already (dilated), consider skeletonizing GT to 1px or generate a signed distance map / boundary map.
+
+    Use a loss designed for thin structures / imbalance
+
+    BCEWithLogits + soft Dice
+    Tversky or Focal Tversky (penalize false positives more than false negatives)
+    Surface/Boundary losses or MSE on distance transform
+
+    Weighted voxel loss / spatial weighting
+
+    Give more weight to center region and to voxels near GT boundary (edge-weight map).
+
+    Post-processing
+
+    Apply skeletonize_3d or 2D morphological thinning to get thin lines and connectivity operations to fill small gaps—this can recover the missing center if probabilities there are close to threshold.
+
+    Data & augmentation
+
+    Add more examples with macular holes or over-sample those cases.
+    Use intensity augmentations but preserve thin-line structure.
+
+    Architectural tweaks
+
+    Add attention gates, residual blocks, or increase capacity so it models local discontinuity.
+    Consider a hybrid: 3D UNet for coarse localization + 2D boundary regression per B-scan for subpixel membrane location.
+
+    Threshold and calibration
+
+    Evaluate PR curve / IoU over thresholds; choose a higher threshold if outputs are too thick.
+
+Concrete implementations you can try
+
+    Combined BCE + Dice loss and Tversky / Focal Tversky for thin structures.
+    Create an edge-weight map from GT (distance transform) and multiply BCE by that.
