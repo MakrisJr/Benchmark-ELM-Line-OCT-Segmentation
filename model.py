@@ -1916,7 +1916,7 @@ class UNet3D(nn.Module):
         self.dec3 = conv_block(512, 256)
         self.up2 = upsample(256, 128)  # no padding needed
         self.dec2 = conv_block(256, 128)
-        self.up1 = upsample(128, 64, output_padding=(1,0,0))  # fixes final depth 48→49
+        self.up1 = upsample(128, 64, output_padding=(1,0,0))  # fixes final depth 48 -> 49
         self.dec1 = conv_block(128, 64)
 
         # Final output layer
@@ -1924,11 +1924,11 @@ class UNet3D(nn.Module):
 
     def forward(self, x):
         # Encoder
-        e1 = self.enc1(x)
-        e2 = self.enc2(self.pool(e1))
-        e3 = self.enc3(self.pool(e2))
-        e4 = self.enc4(self.pool(e3))
-        b = self.bottleneck(self.pool(e4))
+        e1 = self.enc1(x) # B x 64 x 49 x 256 x 256
+        e2 = self.enc2(self.pool(e1)) # B x 128 x 24 x 128 x 128
+        e3 = self.enc3(self.pool(e2)) # B x 256 x 12 x 64 x 64
+        e4 = self.enc4(self.pool(e3)) # B x 512 x 6 x 32 x 32
+        b = self.bottleneck(self.pool(e4)) # B x 1024 x 3 x 16 x 16
 
         # Decoder
         d4 = self.dec4(torch.cat((self.up4(b), e4), dim=1))
@@ -1938,3 +1938,178 @@ class UNet3D(nn.Module):
 
         return self.final(d1)
     
+
+class UNet3D_Aniso(nn.Module):
+    """
+    UNet3D with anisotropic pooling to preserve more depth resolution.
+    Pooling strides: (2,2,2), (2,2,2), (1,2,2), (1,2,2)
+    Corresponding upsampling uses the same strides reversed.
+    """
+    def __init__(self, in_channels=1, out_channels=1, base_filters=64):
+        super().__init__()
+        self.n_classes = out_channels
+
+        def conv_block(in_c, out_c):
+            return nn.Sequential(
+                nn.Conv3d(in_c, out_c, kernel_size=3, padding=1),
+                nn.BatchNorm3d(out_c),
+                nn.ReLU(inplace=True),
+                nn.Conv3d(out_c, out_c, kernel_size=3, padding=1),
+                nn.BatchNorm3d(out_c),
+                nn.ReLU(inplace=True),
+                nn.Conv3d(out_c, out_c, kernel_size=3, padding=1),
+                nn.BatchNorm3d(out_c),
+                nn.ReLU(inplace=True)
+            )
+
+        # anisotropic pooling kernels/strides
+        self.pool1 = nn.MaxPool3d(kernel_size=(2,2,2), stride=(2,2,2))
+        self.pool2 = nn.MaxPool3d(kernel_size=(2,2,2), stride=(2,2,2))
+        self.pool3 = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
+        self.pool4 = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
+
+        # Encoder
+        f = base_filters
+        self.enc1 = conv_block(in_channels, f)
+        self.enc2 = conv_block(f, f*2)
+        self.enc3 = conv_block(f*2, f*4)
+        self.enc4 = conv_block(f*4, f*8)
+
+        # Bottleneck
+        self.bottleneck = conv_block(f*8, f*16)
+
+        # Decoder - use ConvTranspose3d with matching strides
+        self.up4 = nn.ConvTranspose3d(f*16, f*8, kernel_size=(1,2,2), stride=(1,2,2))
+        self.dec4 = conv_block(f*16, f*8)
+
+        self.up3 = nn.ConvTranspose3d(f*8, f*4, kernel_size=(1,2,2), stride=(1,2,2))
+        self.dec3 = conv_block(f*8, f*4)
+
+        self.up2 = nn.ConvTranspose3d(f*4, f*2, kernel_size=(2,2,2), stride=(2,2,2))
+        self.dec2 = conv_block(f*4, f*2)
+
+        self.up1 = nn.ConvTranspose3d(f*2, f, kernel_size=(2,2,2), stride=(2,2,2), output_padding=(1,0,0))
+        self.dec1 = conv_block(f*2, f)
+
+        self.final = nn.Conv3d(f, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        # Encoder
+        e1 = self.enc1(x)                # B x f x 49 x 256 x 256
+        p1 = self.pool1(e1)             # 24 x 128 x 128
+        e2 = self.enc2(p1)              # B x 2f x 24 x 128 x 128
+        p2 = self.pool2(e2)             # 12 x 64 x 64
+        e3 = self.enc3(p2)              # B x 4f x 12 x 64 x 64
+        p3 = self.pool3(e3)             # 12 x 32 x 32 (depth preserved)
+        e4 = self.enc4(p3)              # B x 8f x 12 x 32 x 32
+        p4 = self.pool4(e4)             # 12 x 16 x 16 (depth preserved)
+        b = self.bottleneck(p4)         # B x 16f x 12 x 16 x 16
+
+        # Decoder (reverse order of pooling)
+        u4 = self.up4(b)                # B x 8f x 12 x 32 x 32
+        d4 = self.dec4(torch.cat((u4, e4), dim=1))
+
+        u3 = self.up3(d4)               # B x 4f x 12 x 64 x 64
+        d3 = self.dec3(torch.cat((u3, e3), dim=1))
+
+        u2 = self.up2(d3)               # B x 2f x 24 x 128 x 128
+        d2 = self.dec2(torch.cat((u2, e2), dim=1))
+
+        u1 = self.up1(d2)               # B x f x 49 x 256 x 256 (may need output_padding)
+        # if up1 produces 48 in depth, you may need output_padding=(1,0,0) depending on input dims
+        # concatenate with e1
+        d1 = self.dec1(torch.cat((u1, e1), dim=1))
+
+        return self.final(d1)
+    
+# Frawley's 3D Unet proposal for macular hole segmentation
+# https://github.com/gliff-ai/robust-3d-unet-macular-holes/blob/main/src/models/unet_3d_proposal.py
+class UNet3DFrawley(torch.nn.Module):
+    def __init__(self, in_channels=1, out_channels=1):
+        super(UNet3DFrawley, self).__init__()
+        self.n_classes = out_channels
+        self.conv_down_00 = torch.nn.Conv3d(in_channels, 32, 3, padding=1)
+        self.bn_down_00 = torch.nn.BatchNorm3d(32)
+        self.relu_down_00 = torch.nn.ReLU()
+        self.conv_down_01 = torch.nn.Conv3d(32, 32, 3, padding=1)
+        self.bn_down_01 = torch.nn.BatchNorm3d(32)
+        self.relu_down_01 = torch.nn.ReLU()
+        self.conv_down_02 = torch.nn.Conv3d(32, 64, 3, padding=1)
+        self.bn_down_02 = torch.nn.BatchNorm3d(64)
+        self.relu_down_02 = torch.nn.ReLU()
+        self.conv_down_03 = torch.nn.Conv3d(64, 64, 3, padding=1)
+        self.bn_down_03 = torch.nn.BatchNorm3d(64)
+        self.relu_down_03 = torch.nn.ReLU()
+        self.max_pool_down_00 = torch.nn.MaxPool3d(2) 
+
+        self.conv_down_10 = torch.nn.Conv3d(64, 128, 3, padding=1)
+        self.bn_down_10 = torch.nn.BatchNorm3d(128)
+        self.relu_down_10 = torch.nn.ReLU()
+        self.conv_down_11 = torch.nn.Conv3d(128, 128, 3, padding=1)
+        self.bn_down_11 = torch.nn.BatchNorm3d(128)
+        self.relu_down_11 = torch.nn.ReLU()
+        self.max_pool_down_10 = torch.nn.MaxPool3d(2) # 12 x 64 x 64
+
+        self.conv_bottom_20 = torch.nn.Conv3d(128, 256, 3, padding=1)
+        self.bn_bottom_20 = torch.nn.BatchNorm3d(256)
+        self.relu_bottom_20 = torch.nn.ReLU()
+        self.conv_bottom_21 = torch.nn.Conv3d(256, 256, 3, padding=1)
+        self.bn_bottom_21 = torch.nn.BatchNorm3d(256)
+        self.relu_bottom_21 = torch.nn.ReLU()
+        self.conv_bottom_22 = torch.nn.Conv3d(256, 128, 1) 
+
+        self.conv_up_10 = torch.nn.Conv3d(256, 128, 3, padding=1)
+        self.bn_up_10 = torch.nn.BatchNorm3d(128)
+        self.relu_up_10 = torch.nn.ReLU()
+        self.conv_up_11 = torch.nn.Conv3d(128, 128, 3, padding=1)
+        self.bn_up_11 = torch.nn.BatchNorm3d(128)
+        self.relu_up_11 = torch.nn.ReLU()
+        self.conv_up_12 = torch.nn.Conv3d(128, 64, 1)
+
+        self.conv_up_00 = torch.nn.Conv3d(128, 64, 3, padding=1)
+        self.bn_up_00 = torch.nn.BatchNorm3d(64)
+        self.relu_up_00 = torch.nn.ReLU()
+        self.conv_up_01 = torch.nn.Conv3d(64, 64, 3, padding=1)
+        self.bn_up_01 = torch.nn.BatchNorm3d(64)
+        self.relu_up_01 = torch.nn.ReLU()
+        self.conv_up_02 = torch.nn.ConvTranspose3d(64, out_channels, kernel_size=[2, 1, 1], stride=1, padding=0) 
+
+    def forward(self, x):
+        # DOWN CONV
+        x = self.relu_down_00(self.bn_down_00(self.conv_down_00(x)))
+        x = self.relu_down_01(self.bn_down_01(self.conv_down_01(x)))
+        x = self.relu_down_02(self.bn_down_02(self.conv_down_02(x)))
+        x = self.relu_down_03(self.bn_down_03(self.conv_down_03(x)))
+        first_layer_output = x
+        x = self.max_pool_down_00(x)
+
+        x = self.relu_down_10(self.bn_down_10(self.conv_down_10(x)))
+        x = self.relu_down_11(self.bn_down_11(self.conv_down_11(x)))
+        second_layer_output = x
+        x = self.max_pool_down_10(x)
+
+        # BOTTOM
+        x = self.relu_bottom_20(self.bn_bottom_20(self.conv_bottom_20(x)))
+        x = self.relu_bottom_21(self.bn_bottom_21(self.conv_bottom_21(x)))
+        x = self.conv_bottom_22(torch.nn.functional.interpolate(x, mode='trilinear', scale_factor=2, align_corners=False))
+
+        # UP CONV
+        dx = x.size(-1) - second_layer_output.size(-1)
+        dy = x.size(-2) - second_layer_output.size(-2)
+        dz = x.size(-3) - second_layer_output.size(-3)
+        second_layer_output = torch.nn.functional.pad(second_layer_output, (dx//2, (dx+1)//2, dy//2, (dy+1)//2, dz//2, (dz+1)//2))
+        x = torch.cat((x, second_layer_output), dim=1)
+        x = self.relu_up_10(self.bn_up_10(self.conv_up_10(x)))
+        x = self.relu_up_11(self.bn_up_11(self.conv_up_11(x)))
+        x = self.conv_up_12(torch.nn.functional.interpolate(x, mode='trilinear', scale_factor=2, align_corners=False))
+
+        dx = x.size(-1) - first_layer_output.size(-1)
+        dy = x.size(-2) - first_layer_output.size(-2)
+        dz = x.size(-3) - first_layer_output.size(-3)
+        first_layer_output = torch.nn.functional.pad(first_layer_output, (dx//2, (dx+1)//2, dy//2, (dy+1)//2, dz//2, (dz+1)//2))
+        x = torch.cat((x, first_layer_output), dim=1)
+        x = self.relu_up_00(self.bn_up_00(self.conv_up_00(x)))
+        x = self.relu_up_01(self.bn_up_01(self.conv_up_01(x)))
+        x = self.conv_up_02(x)
+
+        return x

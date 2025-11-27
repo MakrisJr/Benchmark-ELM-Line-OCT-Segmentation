@@ -22,7 +22,7 @@ from torch import optim
 from tqdm import tqdm
 from torchvision import transforms
 from eval import eval_net
-from model import U_Net,AttU_Net,LinkNetImprove,U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet, UNet2, UNet3D
+from model import U_Net,AttU_Net,LinkNetImprove,U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet, UNet2, UNet3D, UNet3D_Aniso, UNet3DFrawley
 from transformation import ELM_transform, ELM_transform_gray
 from tensorboardX import SummaryWriter
 from dataset import BasicDataset, D3Dataset
@@ -53,17 +53,17 @@ def train_net(net,
     val_dir_mask = os.path.join(base_dir, 'data/val/mask/')
     dir_checkpoint = os.path.join(base_dir, 'elm-results/', model_name, 'checkpoints/')
     
-    transform = ELM_transform_gray()
-    train_dataset = D3Dataset(train_dir_img, train_dir_mask, img_scale,transform = transform['train'])
-
-    val_dataset= D3Dataset(val_dir_img, val_dir_mask, img_scale,transform['val'])
+    transform_train = True
+    transform_val = False
+    train_dataset = D3Dataset(train_dir_img, train_dir_mask, img_scale, transform = transform_train)
+    val_dataset= D3Dataset(val_dir_img, val_dir_mask, img_scale, transform = transform_val)
     n_train=len(train_dataset)
     n_val=len(val_dataset)
 
 # ----------- Load the dataset from the directory---------
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True, drop_last=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
 
 
@@ -85,7 +85,7 @@ def train_net(net,
 # !!---------- Defined the optimizer --------------------------!!
 
     optimizer = optim.Adam(net.parameters(), lr = lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-9)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min' if net.n_classes > 1 else 'max', patience=10)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min' if net.n_classes > 1 else 'max', factor = 0.2, patience=10)
 
 # ------------------ Loss function ------------------!!
     criterion_dice = Dice_Loss
@@ -113,8 +113,6 @@ def train_net(net,
                 masks_pred = net(imgs)
                 out_new =  F.sigmoid(masks_pred)
 
-                # masks_probs_flat = masks_pred.view(-1)
-                # true_masks_flat = true_masks.view(-1)
                 loss = 0.5*criterion(masks_pred, true_masks) + 0.5*criterion_dice(out_new, true_masks)
                 epoch_loss += loss.item()
                 writer.add_scalar('Loss/', loss.item(), global_step)
@@ -133,7 +131,7 @@ def train_net(net,
                     print_gpu_mem(device)
                 pbar.update(imgs.shape[0])
                 global_step += 1
-                if global_step % ((n_val+n_train) // (10 * batch_size)) == 0:
+                if global_step % ((n_val+n_train) // (2 * batch_size)) == 0:
                     for tag, value in net.named_parameters():
                         tag = tag.replace('.', '/')
                         writer.add_histogram('weights/' + tag, value.data.cpu().numpy(), global_step)
@@ -158,7 +156,7 @@ def train_net(net,
                         B,C,D,H,W = imgs.shape
                         # permute to (B, D, C, H, W) then flatten B and D into the batch dim
                         imgs_to_write = imgs.permute(0, 2, 1, 3, 4).reshape(B * D, C, H, W)
-                        true_masts_to_write = true_masks.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
+                        true_masks_to_write = true_masks.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
                         masks_pred_to_write = masks_pred.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
                     else:
                         imgs_to_write = imgs
@@ -166,7 +164,7 @@ def train_net(net,
                     writer.add_images('images', imgs_to_write, global_step)
 
                     if net.n_classes == 1:
-                        writer.add_images('masks/true', true_masts_to_write, global_step)
+                        writer.add_images('masks/true', true_masks_to_write, global_step)
                         writer.add_images('masks/pred', torch.sigmoid(masks_pred_to_write) > 0.5, global_step)
 
     if save_cp:
@@ -174,10 +172,9 @@ def train_net(net,
             os.makedirs(os.path.join(dir_checkpoint), exist_ok=True)
             logging.info('Created checkpoint directory')
         except OSError:
+            print("Error: did not save checkpoint")
             pass
         net.load_state_dict(best_model_wts)
-        # t = time.localtime()
-        # timestamp = time.strftime('%b-%d-%Y_%H%M', t)
         torch.save(net.state_dict(), '{}/checkpoints/{}_best_epoch_{}.pth'.format(args.experiment_dir, model_name, best_epoch))
         logging.info(f'Checkpoint {best_epoch} saved !')
 
@@ -244,7 +241,9 @@ if __name__ == '__main__':
     #net = FCN(n_channels=3, n_classes=1)
     # net = SegNet(n_channels=3, n_classes=1)
     # net = UNet2(1,1)
-    net = UNet3D(1,1)
+    # net = UNet3D(1,1)
+    # net = UNet3D_Aniso(1,1)
+    net = UNet3DFrawley(1,1)
 
     MODEL_NAME = f'{net.__class__.__name__}_{time.strftime("%b-%d-%Y_%H%M")}_model'
 
