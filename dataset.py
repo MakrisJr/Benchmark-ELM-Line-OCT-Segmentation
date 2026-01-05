@@ -32,9 +32,16 @@ class BasicDataset(Dataset):
         self.im_ids.sort()
         self.mask_ids.sort()
 
-        for im_id,mask_id in zip(self.im_ids,self.mask_ids):
-            assert im_id == mask_id, \
-                f'Images and masks {im_id} should be the same ID'
+        # keep only the IDs that are present in both images and masks
+        self.im_ids = list(set(self.im_ids) & set(self.mask_ids))
+        self.im_ids.sort()
+        self.mask_ids = self.im_ids.copy()
+
+        # for im_id,mask_id in zip(self.im_ids,self.mask_ids):
+        #     # print(f"Image ID: {im_id}, Mask ID: {mask_id}")
+
+        #     assert im_id == mask_id, \
+        #         f'Images and masks {im_id} should be the same ID'
         
         logging.info(f'Creating dataset with {len(self.im_ids)} examples')
         self.transform=transform
