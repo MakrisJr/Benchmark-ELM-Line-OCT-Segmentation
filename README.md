@@ -69,3 +69,12 @@ Notes:
 
 image 605-19 is missing, I have copied 605-18 as a temporary fix
 same for 389-24 + 1 more 389 slice
+
+
+## Results Test Set
+SegNet: 0.665429
+UNet: 0.671788
+UNet3D: 0.727703
+Frawley3D: 0.751104
+UNet2DEnc3DDec: 0.737300
+UNet3D_Aniso: 0.746722
