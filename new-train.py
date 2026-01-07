@@ -22,7 +22,7 @@ from torch import optim
 from tqdm import tqdm
 from torchvision import transforms
 from eval import eval_net
-from model import U_Net,AttU_Net,LinkNetImprove,U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet, UNet2, UNet3D, UNet3D_Aniso, UNet3DFrawley
+from model import U_Net,AttU_Net,LinkNetImprove,U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet, UNet2, UNet2D_attention, UNet3D, UNet3D_Aniso, UNet3D_Aniso2, UNet3DFrawley, MGUNet_2, UNet2DEnc3DDec
 from transformation import ELM_transform, ELM_transform_gray
 from tensorboardX import SummaryWriter
 from dataset import BasicDataset, D3Dataset
@@ -57,14 +57,12 @@ def train_net(net,
     transform_val = False
     train_dataset = D3Dataset(train_dir_img, train_dir_mask, img_scale, transform = transform_train)
     val_dataset= D3Dataset(val_dir_img, val_dir_mask, img_scale, transform = transform_val)
+
     n_train=len(train_dataset)
     n_val=len(val_dataset)
 
-# ----------- Load the dataset from the directory---------
-
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
-
 
 
     writer = SummaryWriter(logdir=os.path.join(args.experiment_dir, 'logs'), comment=f'LR_{lr}_BS_{batch_size}_SCALE_{img_scale}')
@@ -80,6 +78,7 @@ def train_net(net,
         Checkpoints:     {save_cp}
         Device:          {device.type}
         Images scaling:  {img_scale}
+        Experiment dir: {args.experiment_dir}
     ''')
 
 # !!---------- Defined the optimizer --------------------------!!
@@ -92,9 +91,6 @@ def train_net(net,
     criterion = nn.BCEWithLogitsLoss().cuda()
     
 # !!-------------- Training and validation loop ------------------!!
-    loss_index = []
-    loss_values = []
-    List_Loss = []
     best_acc=0
     for epoch in range(epochs):
         net.train()
@@ -123,10 +119,6 @@ def train_net(net,
                 nn.utils.clip_grad_value_(net.parameters(), 0.1)
                 optimizer.step()
 
-                loss_index.append(epoch) 
-                loss_values.append(epoch_loss)   
-                List_Loss.append([epoch, epoch_loss])
-
                 if epoch == 0 and ibatch == 1:
                     print_gpu_mem(device)
                 pbar.update(imgs.shape[0])
@@ -142,10 +134,10 @@ def train_net(net,
 
                     if net.n_classes > 1:
                         logging.info('Validation cross entropy: {}'.format(val_score))
-                        writer.add_scalar('Loss/test', val_score, global_step)
+                        writer.add_scalar('Loss/val', val_score, global_step)
                     else:
                         # logging.info('Validation Dice Coeff: {}'.format(val_score))
-                        writer.add_scalar('Dice/test', val_score, global_step)
+                        writer.add_scalar('Dice/val', val_score, global_step)
                     
                     if val_score > best_acc:
                         best_acc = val_score
@@ -243,7 +235,11 @@ if __name__ == '__main__':
     # net = UNet2(1,1)
     # net = UNet3D(1,1)
     # net = UNet3D_Aniso(1,1)
-    net = UNet3DFrawley(1,1)
+    # net = UNet3DFrawley(1,1)
+    # net = MGUNet_2(in_channels=1, out_channels=1, feature_scale=4, is_deconv=True, is_batchnorm=True)
+    # net = UNet3D_Aniso2(1,1)
+    # net = UNet2D_attention(in_channels=1, out_channels=1)
+    net = UNet2DEnc3DDec(in_channels=1, out_channels=1)
 
     MODEL_NAME = f'{net.__class__.__name__}_{time.strftime("%b-%d-%Y_%H%M")}_model'
 
