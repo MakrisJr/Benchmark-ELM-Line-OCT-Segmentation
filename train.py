@@ -33,14 +33,6 @@ from efficientunet import *
 import matplotlib.pyplot as plt
 import csv
 
-#------------- Load the images from directory----------
-train_dir_img = './train/image/'
-train_dir_mask = './train/mask/'
-val_dir_img = './val/image/'
-val_dir_mask = './val/mask/'
-dir_checkpoint = './checkpoint/'
-# ------------------Loading END ------------------------
-
 n_classes =1
 n_channels = 3
 
@@ -51,23 +43,35 @@ def train_net(net,
               lr=0.0001,
               val_percent=0.1,
               save_cp=True,
-              img_scale=1):
+              img_scale=1,
+              args=None):
+    
+    if args is None:
+        raise ValueError("Arguments 'args' cannot be None")
+    
+    model_name = args.model_name
+    base_dir = args.base_dir
+
+    train_dir_img = os.path.join(base_dir, "data/train/image/")
+    train_dir_mask = os.path.join(base_dir, "data/train/mask/")
+    val_dir_img = os.path.join(base_dir, "data/val/image/")
+    val_dir_mask = os.path.join(base_dir, "data/val/mask/")
+    dir_checkpoint = os.path.join(base_dir, 'elm-results/', model_name + '/checkpoints/')
     
     transform = ELM_transform()
-    train_dataset = BasicDataset(train_dir_img, train_dir_mask, img_scale,transform = transform['train'])
-    
-    val_dataset= BasicDataset(val_dir_img, val_dir_mask, img_scale,transform['val'])
+    train_dataset = BasicDataset(train_dir_img, train_dir_mask, img_scale, transform = transform['train'])
+    val_dataset= BasicDataset(val_dir_img, val_dir_mask, img_scale, transform = transform['val'])
+
     n_train=len(train_dataset)
     n_val=len(val_dataset)
-
-# ----------- Load the dataset from the directory---------
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True, drop_last=True)
 
-    MODEL_NAME = f'ELM_{time.strftime("%b-%d-%Y_%H%M")}.model'
 
-    writer = SummaryWriter(logdir=f'{MODEL_NAME}/logs', comment=f'LR_{lr}_BS_{batch_size}_SCALE_{img_scale}')
+    writer = SummaryWriter(logdir=os.path.join(args.experiment_dir, 'logs'),
+                            comment=f'LR_{lr}_BS_{batch_size}_SCALE_{img_scale}_{model_name}')
+                           
     print('TensorBoard logs writing to:', writer.logdir)
     global_step = 0
 
@@ -80,6 +84,7 @@ def train_net(net,
         Checkpoints:     {save_cp}
         Device:          {device.type}
         Images scaling:  {img_scale}
+        Experiment dir: {args.experiment_dir}
     ''')
 
 # !!---------- Defined the optimizer --------------------------!!
@@ -92,80 +97,75 @@ def train_net(net,
     criterion = nn.BCEWithLogitsLoss().cuda()
     
 # !!-------------- Training and validation loop ------------------!!
-    loss_index = []
-    loss_values = []
-    List_Loss = []
-    best_acc=0
+    best_score = float('-inf')
+    best_epoch = -1
+    best_model_wts = copy.deepcopy(net.state_dict())
     for epoch in range(epochs):
         net.train()
+        epoch_loss = 0.0
 
-        epoch_loss = 0
         with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img') as pbar:
             for ibatch, batch in enumerate(train_loader):
-                imgs = batch['image']
-                true_masks = batch['mask']
-                imgs = imgs.to(device=device, dtype=torch.float32)
+                imgs = batch['image'].to(device=device, dtype=torch.float32)
                 mask_type = torch.float32 if net.n_classes == 1 else torch.long
-                true_masks = true_masks.to(device=device, dtype=mask_type)
+                true_masks = batch['mask'].to(device=device, dtype=mask_type)
 
                 masks_pred = net(imgs)
-                out_new =  F.sigmoid(masks_pred)
+                out_new =  torch.sigmoid(masks_pred)
 
-                # masks_probs_flat = masks_pred.view(-1)
-                # true_masks_flat = true_masks.view(-1)
                 loss = 0.5*criterion(masks_pred, true_masks) + 0.5*criterion_dice(out_new, true_masks)
-                epoch_loss += loss.item()
-                writer.add_scalar('Loss/', loss.item(), global_step)
-                pbar.set_postfix(**{'loss (batch)': loss.item()})
+                epoch_loss += float(loss.item())
 
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_value_(net.parameters(), 0.1)
-                optimizer.step()
+                optimizer.step()        
 
-                loss_index.append(epoch) 
-                loss_values.append(epoch_loss)   
-                List_Loss.append([epoch, epoch_loss])
+
+                writer.add_scalar('Loss/train_batch', loss.item(), global_step)
+                pbar.set_postfix(**{'loss (batch)': loss.item()})
+                pbar.update(imgs.shape[0])
+                global_step += 1
 
                 if epoch == 0 and ibatch == 1:
                     print_gpu_mem(device)
-                pbar.update(imgs.shape[0])
-                global_step += 1
-                if global_step % ((n_val+n_train) // (10 * batch_size)) == 0:
+                
+                # -------------- Validation round ------------------
+                if global_step % ((n_val+n_train) // (2 * batch_size)) == 0:
                     for tag, value in net.named_parameters():
                         tag = tag.replace('.', '/')
                         writer.add_histogram('weights/' + tag, value.data.cpu().numpy(), global_step)
                         #writer.add_histogram('grads/' + tag, value.grad.data.cpu().numpy(), global_step)
+
                     val_score = eval_net(net, val_loader, device)
                     scheduler.step(val_score)
                     writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], global_step)
 
                     if net.n_classes > 1:
                         logging.info('Validation cross entropy: {}'.format(val_score))
-                        writer.add_scalar('Loss/test', val_score, global_step)
+                        writer.add_scalar('Loss/val', val_score, global_step)
                     else:
                         logging.info('Validation Dice Coeff: {}'.format(val_score))
-                        writer.add_scalar('Dice/test', val_score, global_step)
+                        writer.add_scalar('Dice/val', val_score, global_step)
                     
-                    if val_score > best_acc:
-                        best_acc = val_score
+                    if val_score > best_score:
+                        best_epoch = epoch
+                        best_score = val_score
                         best_model_wts = copy.deepcopy(net.state_dict())
 
                     writer.add_images('images', imgs, global_step)
                     if net.n_classes == 1:
                         writer.add_images('masks/true', true_masks, global_step)
                         writer.add_images('masks/pred', torch.sigmoid(masks_pred) > 0.5, global_step)
+        
+        writer.add_scalar('Loss/train_epoch', epoch_loss / n_train, epoch)
 
     if save_cp:
-        try:
-            os.mkdir(dir_checkpoint)
-            logging.info('Created checkpoint directory')
-        except OSError:
-            pass
+        os.makedirs(dir_checkpoint, exist_ok=True)
         net.load_state_dict(best_model_wts)
-        # t = time.localtime()
-        # timestamp = time.strftime('%b-%d-%Y_%H%M', t)
-        torch.save(net.state_dict(), '{}{}.model'.format(dir_checkpoint, MODEL_NAME))
+        ckpt_path = os.path.join(dir_checkpoint, f'{model_name}_best_epoch_{best_epoch}.pth')
+        torch.save(net.state_dict(), ckpt_path)
+        logging.info(f'Checkpoint saved to {ckpt_path} at epoch {best_epoch}')
 
     writer.close()
 
@@ -184,6 +184,8 @@ def get_args():
                         help='Downscaling factor of the images')
     parser.add_argument('-v', '--validation', dest='val', type=float, default=15.0,
                         help='Percent of the data that is used as validation (0-100)')
+    parser.add_argument('-d', '--base-dir', dest='base_dir', type=str, default='./',
+                        help='Base files directory')
 
     return parser.parse_args()
 
@@ -218,11 +220,20 @@ if __name__ == '__main__':
     #net = get_efficientunet_b3(n_classes=1, concat_input=True, pretrained=True)
     #net = LinkNetImprove(n_channels=3, n_classes=1)
     #net = AttU_Net(n_channels=3, n_classes=1)
-    #net = U_Net(n_channels=3, n_classes=1)
-    #net = R2U_Net(n_channels=3, n_classes=1,t=2)
+    # net = U_Net(n_channels=3, n_classes=1)
+    net = R2U_Net(n_channels=3, n_classes=1,t=2)
     #net = DeepLabv3_plus(n_channels=3, n_classes=1, os=16, pretrained=True, _print=True)
     #net = FCN(n_channels=3, n_classes=1)
-    net = SegNet(n_channels=3, n_classes=1)
+    # net = SegNet(n_channels=3, n_classes=1)
+
+    MODEL_NAME = f'{net.__class__.__name__}_{time.strftime("%b-%d-%Y_%H%M")}_model'
+    experiment_dir = os.path.join(args.base_dir, 'elm-results/', MODEL_NAME)
+    os.makedirs(os.path.join(experiment_dir, 'checkpoints'), exist_ok=True)
+    os.makedirs(os.path.join(experiment_dir, 'logs'), exist_ok=True)
+    logging.info(f'Experiment dir: {experiment_dir}')
+
+    args.model_name = MODEL_NAME
+    args.experiment_dir = experiment_dir
 
     if args.load:
         net.load_state_dict(
@@ -231,16 +242,20 @@ if __name__ == '__main__':
         logging.info(f'Model loaded from {args.load}')
     net.to(device=device)
     try:
-        train_net(net=net,
-                  epochs=args.epochs,
-                  batch_size=args.batchsize,
-                  lr=args.lr,
-                  device=device,
-                  img_scale=args.scale,
-                  val_percent=args.val / 100)
+        train_net(
+            net=net,
+            epochs=args.epochs,
+            batch_size=args.batchsize,
+            lr=args.lr,
+            device=device,
+            img_scale=args.scale,
+            val_percent=args.val / 100.0,
+            args=args
+        )
     except KeyboardInterrupt:
-        torch.save(net.state_dict(), 'INTERRUPTED.pth')
-        logging.info('Saved interrupt')
+        interrupted_path = os.path.join(args.experiment_dir, 'checkpoints', f'INTERRUPTED_{args.model_name}.pth')
+        torch.save(net.state_dict(), interrupted_path)
+        logging.info(f'Saved interrupt checkpoint: {interrupted_path}')
         try:
             sys.exit(0)
         except SystemExit:
