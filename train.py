@@ -12,6 +12,7 @@ Also, thanks to "https://github.com/milesial/" for utilzing some of their codes.
 import argparse
 import logging
 import os
+from pyexpat import model
 import sys
 import copy
 import time
@@ -22,12 +23,12 @@ from torch import optim
 from tqdm import tqdm
 from torchvision import transforms
 from eval import eval_net
-from model import U_Net,AttU_Net,LinkNetImprove,U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet
+from model import U_Net,AttU_Net,LinkNetImprove,U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet, SwinEncoderUNet2D
 from transformation import ELM_transform
 from tensorboardX import SummaryWriter
-from dataset import BasicDataset
+from dataset import BasicDataset, make_2d_transforms
 from torch.utils.data import DataLoader, random_split
-from dice_loss import Dice_Loss
+from dice_loss import dice_loss
 import torch.nn.functional as F
 from efficientunet import *
 import matplotlib.pyplot as plt
@@ -52,13 +53,15 @@ def train_net(net,
     model_name = args.model_name
     base_dir = args.base_dir
 
-    train_dir_img = os.path.join(base_dir, "data/train/image/")
-    train_dir_mask = os.path.join(base_dir, "data/train/mask/")
-    val_dir_img = os.path.join(base_dir, "data/val/image/")
-    val_dir_mask = os.path.join(base_dir, "data/val/mask/")
+    train_dir_img = os.path.join(base_dir, "data_no_anomalies/train/image/")
+    train_dir_mask = os.path.join(base_dir, "data_no_anomalies/train/mask/")
+    val_dir_img = os.path.join(base_dir, "data_no_anomalies/val/image/")
+    val_dir_mask = os.path.join(base_dir, "data_no_anomalies/val/mask/")
     dir_checkpoint = os.path.join(base_dir, 'elm-results/', model_name + '/checkpoints/')
     
-    transform = ELM_transform()
+    transform = make_2d_transforms(train=True, out_size=(256, 256))
+    transform_val = make_2d_transforms(train=False, out_size=(256, 256))
+    transform = {'train': transform, 'val': transform_val}
     train_dataset = BasicDataset(train_dir_img, train_dir_mask, img_scale, transform = transform['train'])
     val_dataset= BasicDataset(val_dir_img, val_dir_mask, img_scale, transform = transform['val'])
 
@@ -88,12 +91,14 @@ def train_net(net,
     ''')
 
 # !!---------- Defined the optimizer --------------------------!!
-
-    optimizer = optim.Adam(net.parameters(), lr = lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-9)
+    if model_name == "SwinEncoderUNet2D":
+        optimizer = torch.optim.AdamW(net.parameters(), lr=1e-4, weight_decay=1e-4)
+    else:
+        optimizer = optim.Adam(net.parameters(), lr = lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-9)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min' if net.n_classes > 1 else 'max', patience=10)
 
 # ------------------ Loss function ------------------!!
-    criterion_dice = Dice_Loss
+    criterion_dice = dice_loss
     criterion = nn.BCEWithLogitsLoss().cuda()
     
 # !!-------------- Training and validation loop ------------------!!
@@ -221,10 +226,16 @@ if __name__ == '__main__':
     #net = LinkNetImprove(n_channels=3, n_classes=1)
     #net = AttU_Net(n_channels=3, n_classes=1)
     # net = U_Net(n_channels=3, n_classes=1)
-    net = R2U_Net(n_channels=3, n_classes=1,t=2)
+    # net = R2U_Net(n_channels=3, n_classes=1,t=2)
     #net = DeepLabv3_plus(n_channels=3, n_classes=1, os=16, pretrained=True, _print=True)
     #net = FCN(n_channels=3, n_classes=1)
     # net = SegNet(n_channels=3, n_classes=1)
+    net = SwinEncoderUNet2D(
+        n_channels=3,
+        n_classes=1,
+        backbone="swin_tiny_patch4_window7_224",
+        pretrained=True,
+    )
 
     MODEL_NAME = f'{net.__class__.__name__}_{time.strftime("%b-%d-%Y_%H%M")}_model'
     experiment_dir = os.path.join(args.base_dir, 'elm-results/', MODEL_NAME)

@@ -18,3 +18,4 @@ __pycache__/
 */test_outputs/*
 eval-3d-outputs/
 nnUNet_raw/
+eval-window-outputs/*
