@@ -6,6 +6,8 @@ from torch.nn import init
 import math
 import torch.utils.model_zoo as model_zoo
 from torchvision import models
+import timm
+from monai.networks.nets import SwinUNETR
 
 
 def init_weights(net, init_type='normal', gain=0.02):
@@ -2313,57 +2315,149 @@ class UNet2D_attention(nn.Module):
 
         return out
 
+class UNet3DFrawley_backup(torch.nn.Module):
+    def __init__(self, in_channels=1, out_channels=1):
+        super(UNet3DFrawley, self).__init__()
+        k = 32
+        self.n_classes = out_channels
+        self.conv_down_00 = torch.nn.Conv3d(in_channels, k, 3, padding=1)
+        self.bn_down_00 = torch.nn.BatchNorm3d(k)
+        self.relu_down_00 = torch.nn.ReLU()
+        self.conv_down_01 = torch.nn.Conv3d(k, k, 3, padding=1)
+        self.bn_down_01 = torch.nn.BatchNorm3d(k)
+        self.relu_down_01 = torch.nn.ReLU()
+        self.conv_down_02 = torch.nn.Conv3d(k, 2*k, 3, padding=1)
+        self.bn_down_02 = torch.nn.BatchNorm3d(2*k)
+        self.relu_down_02 = torch.nn.ReLU()
+        self.conv_down_03 = torch.nn.Conv3d(2*k, 2*k, 3, padding=1)
+        self.bn_down_03 = torch.nn.BatchNorm3d(2*k)
+        self.relu_down_03 = torch.nn.ReLU()
+        self.max_pool_down_00 = torch.nn.MaxPool3d(2) 
+
+        self.conv_down_10 = torch.nn.Conv3d(2*k, 4*k, 3, padding=1)
+        self.bn_down_10 = torch.nn.BatchNorm3d(4*k)
+        self.relu_down_10 = torch.nn.ReLU()
+        self.conv_down_11 = torch.nn.Conv3d(4*k, 4*k, 3, padding=1)
+        self.bn_down_11 = torch.nn.BatchNorm3d(4*k)
+        self.relu_down_11 = torch.nn.ReLU()
+        self.max_pool_down_10 = torch.nn.MaxPool3d(2) # 12 x 64 x 64
+
+        self.conv_bottom_20 = torch.nn.Conv3d(4*k, 8*k, 3, padding=1)
+        self.bn_bottom_20 = torch.nn.BatchNorm3d(8*k)
+        self.relu_bottom_20 = torch.nn.ReLU()
+        self.conv_bottom_21 = torch.nn.Conv3d(8*k, 8*k, 3, padding=1)
+        self.bn_bottom_21 = torch.nn.BatchNorm3d(8*k)
+        self.relu_bottom_21 = torch.nn.ReLU()
+        self.conv_bottom_22 = torch.nn.Conv3d(8*k, 4*k, 1) 
+
+        self.conv_up_10 = torch.nn.Conv3d(8*k, 4*k, 3, padding=1)
+        self.bn_up_10 = torch.nn.BatchNorm3d(4*k)
+        self.relu_up_10 = torch.nn.ReLU()
+        self.conv_up_11 = torch.nn.Conv3d(4*k, 4*k, 3, padding=1)
+        self.bn_up_11 = torch.nn.BatchNorm3d(4*k)
+        self.relu_up_11 = torch.nn.ReLU()
+        self.conv_up_12 = torch.nn.Conv3d(4*k, 2*k, 1)
+
+        self.conv_up_00 = torch.nn.Conv3d(4*k, 2*k, 3, padding=1)
+        self.bn_up_00 = torch.nn.BatchNorm3d(2*k)
+        self.relu_up_00 = torch.nn.ReLU()
+        self.conv_up_01 = torch.nn.Conv3d(2*k, 2*k, 3, padding=1)
+        self.bn_up_01 = torch.nn.BatchNorm3d(2*k)
+        self.relu_up_01 = torch.nn.ReLU()
+        self.conv_up_02 = torch.nn.ConvTranspose3d(2*k, out_channels, kernel_size=[2, 1, 1], stride=1, padding=0) 
+
+    def forward(self, x):
+        # DOWN CONV
+        x = self.relu_down_00(self.bn_down_00(self.conv_down_00(x)))
+        x = self.relu_down_01(self.bn_down_01(self.conv_down_01(x)))
+        x = self.relu_down_02(self.bn_down_02(self.conv_down_02(x)))
+        x = self.relu_down_03(self.bn_down_03(self.conv_down_03(x)))
+        first_layer_output = x
+        x = self.max_pool_down_00(x)
+
+        x = self.relu_down_10(self.bn_down_10(self.conv_down_10(x)))
+        x = self.relu_down_11(self.bn_down_11(self.conv_down_11(x)))
+        second_layer_output = x
+        x = self.max_pool_down_10(x)
+
+        # BOTTOM
+        x = self.relu_bottom_20(self.bn_bottom_20(self.conv_bottom_20(x)))
+        x = self.relu_bottom_21(self.bn_bottom_21(self.conv_bottom_21(x)))
+        x = self.conv_bottom_22(torch.nn.functional.interpolate(x, mode='trilinear', scale_factor=2, align_corners=False))
+
+        # UP CONV
+        dx = x.size(-1) - second_layer_output.size(-1)
+        dy = x.size(-2) - second_layer_output.size(-2)
+        dz = x.size(-3) - second_layer_output.size(-3)
+        second_layer_output = torch.nn.functional.pad(second_layer_output, (dx//2, (dx+1)//2, dy//2, (dy+1)//2, dz//2, (dz+1)//2))
+        x = torch.cat((x, second_layer_output), dim=1)
+        x = self.relu_up_10(self.bn_up_10(self.conv_up_10(x)))
+        x = self.relu_up_11(self.bn_up_11(self.conv_up_11(x)))
+        x = self.conv_up_12(torch.nn.functional.interpolate(x, mode='trilinear', scale_factor=2, align_corners=False))
+
+        dx = x.size(-1) - first_layer_output.size(-1)
+        dy = x.size(-2) - first_layer_output.size(-2)
+        dz = x.size(-3) - first_layer_output.size(-3)
+        first_layer_output = torch.nn.functional.pad(first_layer_output, (dx//2, (dx+1)//2, dy//2, (dy+1)//2, dz//2, (dz+1)//2))
+        x = torch.cat((x, first_layer_output), dim=1)
+        x = self.relu_up_00(self.bn_up_00(self.conv_up_00(x)))
+        x = self.relu_up_01(self.bn_up_01(self.conv_up_01(x)))
+        x = self.conv_up_02(x)
+
+        return x
+    
 # Frawley's 3D Unet proposal for macular hole segmentation
 # https://github.com/gliff-ai/robust-3d-unet-macular-holes/blob/main/src/models/unet_3d_proposal.py
 class UNet3DFrawley(torch.nn.Module):
     def __init__(self, in_channels=1, out_channels=1):
         super(UNet3DFrawley, self).__init__()
+        k = 32
         self.n_classes = out_channels
-        self.conv_down_00 = torch.nn.Conv3d(in_channels, 32, 3, padding=1)
-        self.bn_down_00 = torch.nn.BatchNorm3d(32)
+        self.conv_down_00 = torch.nn.Conv3d(in_channels, k, 3, padding=1)
+        self.bn_down_00 = torch.nn.BatchNorm3d(k)
         self.relu_down_00 = torch.nn.ReLU()
-        self.conv_down_01 = torch.nn.Conv3d(32, 32, 3, padding=1)
-        self.bn_down_01 = torch.nn.BatchNorm3d(32)
+        self.conv_down_01 = torch.nn.Conv3d(k, k, 3, padding=1)
+        self.bn_down_01 = torch.nn.BatchNorm3d(k)
         self.relu_down_01 = torch.nn.ReLU()
-        self.conv_down_02 = torch.nn.Conv3d(32, 64, 3, padding=1)
-        self.bn_down_02 = torch.nn.BatchNorm3d(64)
+        self.conv_down_02 = torch.nn.Conv3d(k, 2*k, 3, padding=1)
+        self.bn_down_02 = torch.nn.BatchNorm3d(2*k)
         self.relu_down_02 = torch.nn.ReLU()
-        self.conv_down_03 = torch.nn.Conv3d(64, 64, 3, padding=1)
-        self.bn_down_03 = torch.nn.BatchNorm3d(64)
+        self.conv_down_03 = torch.nn.Conv3d(2*k, 2*k, 3, padding=1)
+        self.bn_down_03 = torch.nn.BatchNorm3d(2*k)
         self.relu_down_03 = torch.nn.ReLU()
         self.max_pool_down_00 = torch.nn.MaxPool3d(2) 
 
-        self.conv_down_10 = torch.nn.Conv3d(64, 128, 3, padding=1)
-        self.bn_down_10 = torch.nn.BatchNorm3d(128)
+        self.conv_down_10 = torch.nn.Conv3d(2*k, 4*k, 3, padding=1)
+        self.bn_down_10 = torch.nn.BatchNorm3d(4*k)
         self.relu_down_10 = torch.nn.ReLU()
-        self.conv_down_11 = torch.nn.Conv3d(128, 128, 3, padding=1)
-        self.bn_down_11 = torch.nn.BatchNorm3d(128)
+        self.conv_down_11 = torch.nn.Conv3d(4*k, 4*k, 3, padding=1)
+        self.bn_down_11 = torch.nn.BatchNorm3d(4*k)
         self.relu_down_11 = torch.nn.ReLU()
         self.max_pool_down_10 = torch.nn.MaxPool3d(2) # 12 x 64 x 64
 
-        self.conv_bottom_20 = torch.nn.Conv3d(128, 256, 3, padding=1)
-        self.bn_bottom_20 = torch.nn.BatchNorm3d(256)
+        self.conv_bottom_20 = torch.nn.Conv3d(4*k, 8*k, 3, padding=1)
+        self.bn_bottom_20 = torch.nn.BatchNorm3d(8*k)
         self.relu_bottom_20 = torch.nn.ReLU()
-        self.conv_bottom_21 = torch.nn.Conv3d(256, 256, 3, padding=1)
-        self.bn_bottom_21 = torch.nn.BatchNorm3d(256)
+        self.conv_bottom_21 = torch.nn.Conv3d(8*k, 8*k, 3, padding=1)
+        self.bn_bottom_21 = torch.nn.BatchNorm3d(8*k)
         self.relu_bottom_21 = torch.nn.ReLU()
-        self.conv_bottom_22 = torch.nn.Conv3d(256, 128, 1) 
+        self.conv_bottom_22 = torch.nn.Conv3d(8*k, 4*k, 1) 
 
-        self.conv_up_10 = torch.nn.Conv3d(256, 128, 3, padding=1)
-        self.bn_up_10 = torch.nn.BatchNorm3d(128)
+        self.conv_up_10 = torch.nn.Conv3d(8*k, 4*k, 3, padding=1)
+        self.bn_up_10 = torch.nn.BatchNorm3d(4*k)
         self.relu_up_10 = torch.nn.ReLU()
-        self.conv_up_11 = torch.nn.Conv3d(128, 128, 3, padding=1)
-        self.bn_up_11 = torch.nn.BatchNorm3d(128)
+        self.conv_up_11 = torch.nn.Conv3d(4*k, 4*k, 3, padding=1)
+        self.bn_up_11 = torch.nn.BatchNorm3d(4*k)
         self.relu_up_11 = torch.nn.ReLU()
-        self.conv_up_12 = torch.nn.Conv3d(128, 64, 1)
+        self.conv_up_12 = torch.nn.Conv3d(4*k, 2*k, 1)
 
-        self.conv_up_00 = torch.nn.Conv3d(128, 64, 3, padding=1)
-        self.bn_up_00 = torch.nn.BatchNorm3d(64)
+        self.conv_up_00 = torch.nn.Conv3d(4*k, 2*k, 3, padding=1)
+        self.bn_up_00 = torch.nn.BatchNorm3d(2*k)
         self.relu_up_00 = torch.nn.ReLU()
-        self.conv_up_01 = torch.nn.Conv3d(64, 64, 3, padding=1)
-        self.bn_up_01 = torch.nn.BatchNorm3d(64)
+        self.conv_up_01 = torch.nn.Conv3d(2*k, 2*k, 3, padding=1)
+        self.bn_up_01 = torch.nn.BatchNorm3d(2*k)
         self.relu_up_01 = torch.nn.ReLU()
-        self.conv_up_02 = torch.nn.ConvTranspose3d(64, out_channels, kernel_size=[2, 1, 1], stride=1, padding=0) 
+        self.conv_up_02 = torch.nn.ConvTranspose3d(2*k, out_channels, kernel_size=[2, 1, 1], stride=1, padding=0) 
 
     def forward(self, x):
         # DOWN CONV
@@ -2645,23 +2739,25 @@ class MGUNet_2(nn.Module):
 # ---------------------------
 
 class ConvBlock2D(nn.Module):
-    """(Conv2d -> ReLU) * 2"""
-    def __init__(self, in_c: int, out_c: int):
+    """(Conv2d -> GroupNorm -> ReLU) * 2"""
+    def __init__(self, in_c: int, out_c: int, groups: int = 8):
         super().__init__()
+        g = min(groups, out_c)  # safety for small channel counts
         self.net = nn.Sequential(
             nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(g, out_c),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_c, out_c, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(g, out_c),
             nn.ReLU(inplace=True),
         )
-
     def forward(self, x):
         return self.net(x)
 
 
 class ConvBlock3D(nn.Module):
     """(Conv3d -> ReLU) * 2, default full 3x3x3 (mixes slices)."""
-    def __init__(self, in_c: int, out_c: int, kz: int = 3):
+    def __init__(self, in_c: int, out_c: int, kz: int = 3, groups: int = 8):
         """
         kz:
           - 3 => kernel (3,3,3) full 3D mixing
@@ -2671,10 +2767,14 @@ class ConvBlock3D(nn.Module):
         assert kz in (1, 3)
         k = (kz, 3, 3)
         p = (kz // 2, 1, 1)
+        g = min(groups, out_c)
+
         self.net = nn.Sequential(
             nn.Conv3d(in_c, out_c, kernel_size=k, padding=p, bias=False),
+            nn.GroupNorm(g, out_c),
             nn.ReLU(inplace=True),
             nn.Conv3d(out_c, out_c, kernel_size=k, padding=p, bias=False),
+            nn.GroupNorm(g, out_c),
             nn.ReLU(inplace=True),
         )
 
@@ -2745,6 +2845,13 @@ class UNet2DEnc3DDec(nn.Module):
         self.up1 = upsample_inplane(base * 2, base)
         self.dec1 = ConvBlock3D(base * 2, base, kz=kz_dec1)
 
+        # self.z_refine = nn.Sequential(
+        #     nn.Conv3d(base, base, kernel_size=(3,1,1), padding=(1,0,0), bias=False),
+        #     nn.GroupNorm(min(8, base), base),
+        #     nn.ReLU(inplace=True),
+        # )
+
+
         self.final = nn.Conv3d(base, out_channels, kernel_size=1)
 
     @staticmethod
@@ -2810,4 +2917,586 @@ class UNet2DEnc3DDec(nn.Module):
         u1 = self.up1(d2)                         # B x b x D x H    x W
         d1 = self.dec1(torch.cat([u1, e1], 1))     # B x b x D x H    x W
 
+        # d1 = self.z_refine(d1)                    # B x b x D x H    x W
         return self.final(d1)                     # B x out_channels x D x H x W
+    
+
+# CSAM:
+class ConvBlock(nn.Module):
+    def __init__(self, input_channels, output_channels, max_pool, return_single=False):
+        super().__init__()
+        self.max_pool = max_pool
+        self.return_single = return_single
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(input_channels, output_channels, 3, 1, 1),
+            nn.InstanceNorm2d(output_channels),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv2d(output_channels, output_channels, 3, 1, 1),
+            nn.InstanceNorm2d(output_channels),
+            nn.LeakyReLU(inplace=True),
+        )
+        if max_pool:
+            self.pool = nn.MaxPool2d(2, stride=2)
+
+    def forward(self, x):
+        x = self.conv(x)
+        b = x
+        if self.max_pool:
+            x = self.pool(x)
+        if self.return_single:
+            return x
+        return x, b
+
+
+class DeconvBlock(nn.Module):
+    def __init__(self, input_channels, output_channels, intermediate_channels=-1):
+        super().__init__()
+        input_channels = int(input_channels)
+        output_channels = int(output_channels)
+
+        if intermediate_channels < 0:
+            intermediate_channels = output_channels * 2
+        else:
+            intermediate_channels = input_channels
+
+        self.upconv = nn.Sequential(
+            nn.UpsamplingBilinear2d(scale_factor=2),
+            nn.Conv2d(input_channels, intermediate_channels // 2, 3, 1, 1),
+        )
+        self.conv = ConvBlock(intermediate_channels, output_channels, max_pool=False)
+
+    def forward(self, x, b):
+        x = self.upconv(x)
+        x = torch.cat((x, b), dim=1)
+        x, _ = self.conv(x)
+        return x
+
+
+class UNetDecoder(nn.Module):
+    """
+    Fixed: has a forward() and uses a ModuleList.
+    Expects skips in decoder order: high-res -> low-res.
+    """
+    def __init__(self, num_layers, base_num):
+        super().__init__()
+        self.blocks = nn.ModuleList()
+        for i in range(num_layers - 1, 0, -1):
+            self.blocks.append(
+                DeconvBlock(base_num * (2 ** i), base_num * (2 ** (i - 1)))
+            )
+
+    def forward(self, x, skips):
+        assert len(skips) == len(self.blocks), f"Expected {len(self.blocks)} skips, got {len(skips)}"
+        for blk, skip in zip(self.blocks, skips):
+            x = blk(x, skip)
+        return x
+    
+# -------------------------
+# Vectorized CSAM for volumes: semantic + positional + slice (per B sample)
+# Works on x shaped [B, D, C, H, W]
+# -------------------------
+class SemanticAttention5D(nn.Module):
+    """
+    Operates on the chanenel dimension C. 
+    Which feature channels are more important for this volume?
+    """
+    def __init__(self, channels: int, reduction: int = 16):
+        super().__init__()
+        hidden = max(channels // reduction, 4)
+        self.mlp = nn.Sequential(
+            nn.Linear(channels, hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, channels),
+        )
+
+    def forward(self, x):
+        # x: [B,D,C,H,W]
+        B, D, C, H, W = x.shape
+        avg = x.mean(dim=(1, 3, 4))   # [B,C]
+        mx  = x.amax(dim=(1, 3, 4))   # [B,C]
+        gate = torch.sigmoid(self.mlp(avg) + self.mlp(mx)).view(B, 1, C, 1, 1)
+        return x * gate
+
+
+class PositionalAttention5D(nn.Module):
+    """
+    Operates on the spatial dimensions H/W.
+    Which spatial locations are more important for this volume?
+    """
+    def __init__(self, kernel_size: int = 7):
+        super().__init__()
+        pad = kernel_size // 2
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=pad)
+
+    def forward(self, x):
+        # x: [B,D,C,H,W]
+        B, D, C, H, W = x.shape
+        xd = x.reshape(B * D, C, H, W)              # [B*D,C,H,W]
+        avg = xd.mean(dim=1, keepdim=True)          # [B*D,1,H,W]
+        mx  = xd.amax(dim=1, keepdim=True)          # [B*D,1,H,W]
+        att = torch.sigmoid(self.conv(torch.cat([mx, avg], dim=1)))  # [B*D,1,H,W]
+        xd = xd * att
+        return xd.view(B, D, C, H, W)
+
+
+class SliceAttention5D(nn.Module):
+    """
+    Operates on the slice dimension D.
+    Which slices are more important for this volume?
+    """
+    def __init__(self, channels: int, hidden: int = 128):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(channels, hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, 1),  # score per slice
+        )
+
+    def forward(self, x):
+        # x: [B,D,C,H,W]
+        B, D, C, H, W = x.shape
+        desc = x.mean(dim=(3, 4))          # [B,D,C]
+        scores = self.mlp(desc)            # [B,D,1]
+        w = torch.softmax(scores, dim=1).view(B, D, 1, 1, 1)
+        return x * w
+
+
+class CSAM5D(nn.Module):
+    def __init__(self, channels: int, semantic=True, positional=True, slice_att=True):
+        super().__init__()
+        self.semantic_on = semantic
+        self.positional_on = positional
+        self.slice_on = slice_att
+        if semantic:
+            self.semantic = SemanticAttention5D(channels)
+        if positional:
+            self.positional = PositionalAttention5D(kernel_size=7)
+        if slice_att:
+            self.slice = SliceAttention5D(channels)
+
+    def forward(self, x):
+        if self.semantic_on:
+            x = self.semantic(x)
+        if self.positional_on:
+            x = self.positional(x)
+        if self.slice_on:
+            x = self.slice(x)
+        return x
+
+
+# -------------------------
+# Encoder with CSAM applied at each level (vectorized per-batch)
+# Input/Output interface is volume-first to match your training loop:
+#   input:  [B, 1, D, H, W]
+#   output: [B, 1, D, H, W] (logits)
+# -------------------------
+class EncoderCSAM5D(nn.Module):
+    """
+    Slice-wise 2D encoder with volume CSAM inserted on skip features and bottleneck.
+    """
+    def __init__(self, input_channels, num_layers, base_num,
+                 semantic=True, positional=True, slice_att=True):
+        super().__init__()
+        self.num_layers = num_layers
+
+        self.blocks = nn.ModuleList()
+        self.attn = nn.ModuleList()
+
+        for i in range(num_layers):
+            in_ch = input_channels if i == 0 else base_num * (2 ** (i - 1))
+            out_ch = base_num * (2 ** i)
+            use_pool = (i != num_layers - 1)  # no pool at last (bottleneck)
+            self.blocks.append(ConvBlock(in_ch, out_ch, max_pool=use_pool))
+            self.attn.append(CSAM5D(out_ch, semantic=semantic, positional=positional, slice_att=slice_att))
+
+    def forward(self, x):
+        """
+        x: [B,1,D,H,W]
+        Returns:
+          bottleneck_2d: [B*D, Cb, Hb, Wb]
+          skips: list of skip tensors for decoder, each [B*D, Ci, Hi, Wi], high-res first
+          meta: (B,D) for reshaping
+        """
+        if x.dim() != 5:
+            raise ValueError(f"Expected input [B,1,D,H,W], got {x.shape}")
+
+        B, C0, D, H, W = x.shape
+
+        # Flatten volume into slice-batch: [B*D, C, H, W]
+        xs = x.permute(0, 2, 1, 3, 4).reshape(B * D, C0, H, W)
+
+        skips_2d = []
+        cur = xs
+
+        for i in range(self.num_layers):
+            cur, skip = self.blocks[i](cur)  # skip: [B*D, Ci, Hi, Wi]; cur pooled if not last
+            Ci, Hi, Wi = skip.shape[1], skip.shape[2], skip.shape[3]
+
+            # Apply CSAM in 5D space: reshape skip -> [B,D,C,H,W]
+            skip5d = skip.view(B, D, Ci, Hi, Wi)
+            skip5d = self.attn[i](skip5d)
+            skip = skip5d.view(B * D, Ci, Hi, Wi)
+
+            # collect skips for decoder except bottleneck (last)
+            if i != self.num_layers - 1:
+                skips_2d.append(skip)
+            else:
+                cur = skip 
+
+        # Decoder expects high-res first; we collected from shallow->deep. Reverse.
+        skips_2d = skips_2d[::-1]
+        return cur, skips_2d, (B, D)
+
+
+class CSAM_UNet2p5D(nn.Module):
+    """
+    End-to-end segmentation model:
+      input:  [B,1,D,H,W]
+      output: [B,1,D,H,W] logits (for BCEWithLogitsLoss + Dice)
+    """
+    def __init__(self, in_channels=1, out_channels=1, num_layers=5, base_num=32,
+                 semantic=True, positional=True, slice_att=True):
+        super().__init__()
+        self.n_classes = out_channels
+        self.encoder = EncoderCSAM5D(in_channels, num_layers, base_num,
+                                     semantic=semantic, positional=positional, slice_att=slice_att)
+        self.decoder = UNetDecoder(num_layers, base_num)
+        self.head = nn.Conv2d(base_num, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        # x: [B,1,D,H,W]
+        bottleneck, skips, meta = self.encoder(x)      # bottleneck: [B*D, Cb, hb, wb]
+        y2d = self.decoder(bottleneck, skips)          # [B*D, base_num, H, W]
+        y2d = self.head(y2d)                           # [B*D, out, H, W]
+
+        B, D = meta
+        H, W = y2d.shape[-2], y2d.shape[-1]
+        y = y2d.view(B, D, self.n_classes, H, W).permute(0, 2, 1, 3, 4)  # [B,out,D,H,W]
+        return y
+
+
+# 2.5D stacked-slices-as-channels UNet:
+class UNet2D(nn.Module):
+    """
+    Plain 2D U-Net that accepts [N, Cin, H, W] and outputs [N, Cout, H, W]
+    Using your blocks.
+    """
+    def __init__(self, in_channels, out_channels=1, num_layers=5, base_num=32):
+        super().__init__()
+        self.n_classes = out_channels
+        self.num_layers = num_layers
+
+        self.enc = nn.ModuleList()
+        for i in range(num_layers):
+            in_ch = in_channels if i == 0 else base_num * (2 ** (i - 1))
+            out_ch = base_num * (2 ** i)
+            use_pool = (i != num_layers - 1)
+            self.enc.append(ConvBlock(in_ch, out_ch, max_pool=use_pool))
+
+        self.dec = UNetDecoder(num_layers, base_num)
+        self.head = nn.Conv2d(base_num, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        # x: [N, Cin, H, W]
+        skips = []
+        cur = x
+        for i in range(self.num_layers):
+            cur, skip = self.enc[i](cur)
+            if i != self.num_layers - 1:
+                skips.append(skip)
+        skips = skips[::-1]
+        cur = self.dec(cur, skips)
+        return self.head(cur)
+
+
+class UNet2p5D_SlidingWindow(nn.Module):
+    """
+    2.5D stacked-slices-as-channels via sliding window:
+      input : [B, 1, D, H, W]
+      output: [B, 1, D, H, W]   (logits per slice)
+
+    For each slice d, build k-channel input = neighboring slices around d,
+    then run a 2D U-Net to predict the center slice mask.
+    """
+    def __init__(self, k=7, out_channels=1, num_layers=5, base_num=32, pad_mode="replicate"):
+        super().__init__()
+        assert k % 2 == 1, "k must be odd (e.g., 5,7,9)"
+        self.k = k
+        self.r = k // 2
+        self.pad_mode = pad_mode
+        self.n_classes = out_channels
+
+        # 2D UNet that mixes slices as channels
+        self.unet2d = UNet2D(in_channels=k, out_channels=out_channels, num_layers=num_layers, base_num=base_num)
+
+    def forward(self, x):
+        """
+        x: [B, 1, D, H, W]
+        return: [B, 1, D, H, W]
+        """
+        if x.dim() != 5:
+            raise ValueError(f"Expected [B,1,D,H,W], got {x.shape}")
+        B, C, D, H, W = x.shape
+        if C != 1:
+            raise ValueError("Expected single-channel grayscale input (C=1).")
+
+        # Make depth-first: [B, D, H, W]
+        v = x[:, 0]  # [B, D, H, W]
+
+        # Pad along depth so every slice has a full k-window
+        # pad format for F.pad on 4D is (..., Wpad, Hpad, Dpad) but for [B,D,H,W],
+        # treat D as dim=1, so pad=(Wl,Wr,Hl,Hr,Dl,Dr)
+        v_pad = F.pad(v, pad=(0, 0, 0, 0, self.r, self.r), mode=self.pad_mode)  # [B, D+2r, H, W]
+
+        # Build sliding windows: for each d in [0..D-1], take v_pad[:, d:d+k]
+        # Result: [B, D, k, H, W]
+        windows = v_pad.unfold(dimension=1, size=self.k, step=1)  # [B, D, H, W, k] OR [B,D,k,H,W] depending on PyTorch
+        # PyTorch unfold puts the new dimension at the end: [B, D, H, W, k]
+        # We want [B, D, k, H, W]
+        windows = windows.permute(0, 1, 4, 2, 3).contiguous()
+
+        # Flatten slices into batch for 2D UNet: [B*D, k, H, W]
+        inp2d = windows.view(B * D, self.k, H, W)
+
+        # Predict center slice for each window: [B*D, 1, H, W]
+        out2d = self.unet2d(inp2d)
+
+        # Reshape back to volume: [B, D, 1, H, W] -> [B, 1, D, H, W]
+        out = out2d.view(B, D, self.n_classes, H, W).permute(0, 2, 1, 3, 4).contiguous()
+        return out
+
+
+
+#############
+# SWIN UNET
+#############
+
+class ConvBNReLU(nn.Module):
+    def __init__(self, in_ch, out_ch, k=3, s=1, p=1):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernel_size=k, stride=s, padding=p, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class DecoderBlock(nn.Module):
+    def __init__(self, in_ch, skip_ch, out_ch):
+        super().__init__()
+        self.conv1 = ConvBNReLU(in_ch + skip_ch, out_ch)
+        self.conv2 = ConvBNReLU(out_ch, out_ch)
+
+    def forward(self, x, skip=None):
+        x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
+        if skip is not None:
+            if x.shape[-2:] != skip.shape[-2:]:
+                x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
+            x = torch.cat([x, skip], dim=1)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        return x
+
+
+class SwinEncoderUNet2D(nn.Module):
+    """
+    Pretrained Swin encoder + custom CNN decoder for binary segmentation.
+    Input:  [B, C, H, W]
+    Output: [B, 1, H, W] logits
+    """
+    def __init__(
+        self,
+        n_channels=1,
+        n_classes=1,
+        backbone="swin_tiny_patch4_window7_224",
+        pretrained=True,
+    ):
+        super().__init__()
+
+        self.encoder = timm.create_model(
+            backbone,
+            pretrained=pretrained,
+            in_chans=n_channels,
+            features_only=True,
+            out_indices=(0, 1, 2, 3),
+            img_size = 256
+        )
+        self.n_classes = n_classes
+        self.n_channels = n_channels
+
+        enc_channels = self.encoder.feature_info.channels()
+        # For swin_tiny this is typically [96, 192, 384, 768]
+
+        self.center = nn.Sequential(
+            ConvBNReLU(enc_channels[-1], enc_channels[-1]),
+            ConvBNReLU(enc_channels[-1], enc_channels[-1]),
+        )
+
+        self.dec4 = DecoderBlock(enc_channels[-1], enc_channels[-2], 384)
+        self.dec3 = DecoderBlock(384, enc_channels[-3], 192)
+        self.dec2 = DecoderBlock(192, enc_channels[-4], 96)
+        self.dec1 = DecoderBlock(96, 0, 64)
+        self.dec0 = DecoderBlock(64, 0, 32)
+
+        self.seg_head = nn.Conv2d(32, n_classes, kernel_size=1)
+
+    @staticmethod
+    def _to_nchw(x):
+        # timm Swin features are commonly NHWC
+        if x.ndim == 4 and x.shape[1] != x.shape[-1]:
+            # likely NHWC -> NCHW
+            x = x.permute(0, 3, 1, 2).contiguous()
+        return x
+
+    def forward(self, x):
+        H, W = x.shape[-2:]
+
+        feats = self.encoder(x)
+        f1, f2, f3, f4 = [self._to_nchw(f) for f in feats]
+
+        x = self.center(f4)
+        x = self.dec4(x, f3)
+        x = self.dec3(x, f2)
+        x = self.dec2(x, f1)
+        x = self.dec1(x, None)
+        x = self.dec0(x, None)
+
+        x = self.seg_head(x)
+
+        if x.shape[-2:] != (H, W):
+            x = F.interpolate(x, size=(H, W), mode="bilinear", align_corners=False)
+
+        return x
+
+
+##########################
+# SwinUNETR 3D from MONAI:
+##########################
+
+class SwinUNETR3D(nn.Module):
+    """
+    3D Swin UNETR wrapper:
+      input : [B, C, D, H, W]
+      output: [B, out_channels, D, H, W]
+
+    Expected OCT input:
+      [B, 1, 49, 256, 256]
+
+    Internally, depth is padded from 49 -> 64 so that SwinUNETR's hierarchical
+    downsampling works cleanly. The prediction is cropped back to depth 49,
+    so externally it behaves like the rest of the models.
+    """
+        
+    def __init__(self, in_channels=1, n_classes=1, img_size=(64,256,256), feature_size=48,
+                 use_checkpoint=False, pretrained_path=None, train_decoder_from_scratch=True,
+                   freeze_encoder=False):
+        super().__init__()
+        self.n_classes = n_classes
+        self.in_channels = in_channels
+        self.internal_img_size = img_size
+        self.expected_input_size = (49,256,256)
+        # https://monai.readthedocs.io/en/latest/networks.html#swinunetr
+        self.model = SwinUNETR(
+            spatial_dims=3,
+            in_channels=in_channels,
+            out_channels=n_classes,
+            feature_size=feature_size,
+            use_checkpoint=use_checkpoint,
+        )
+
+        if pretrained_path is not None:
+            self.load_pretrained(pretrained_path)
+
+        if freeze_encoder:
+            self.freeze_encoder()
+
+        if train_decoder_from_scratch:
+            self.reset_decoder()
+
+    def pad_input(self, x):
+        """
+        Pad [B, C, 49, 256, 256] -> [B, C, 64, 256, 256].
+        Returns padded tensor and pad tuple for cropping back.
+        """
+        _, _, d, h, w = x.shape
+        td, th, tw = self.internal_img_size
+
+        if h != th or w != tw:
+            raise ValueError(f"Expected HxW={(th, tw)}, got {(h, w)}")
+        if d > td:
+            raise ValueError(f"Input depth {d} exceeds internal depth {td}")
+
+        pad_d = td - d
+        pad_front = pad_d // 2
+        pad_back = pad_d - pad_front
+
+        pads = (0, 0, 0, 0, pad_front, pad_back)  # (Wl, Wr, Hl, Hr, Dl, Dr), from last dim to first.
+        x = F.pad(x, pads, mode="replicate")
+        return x, pads
+    
+    @staticmethod
+    def crop_output(y, pads):
+        """
+        Crop [B, C, 64, 256, 256] back to [B, C, 49, 256, 256].
+        """
+        _, _, d, _, _ = y.shape
+        pad_front = pads[4] # n means first n - 1 must be removed.
+        pad_back = pads[5] 
+        d_end = d - pad_back if pad_back > 0 else d
+        return y[:, :, pad_front:d_end, :, :]
+    
+    def forward(self, x):
+        x, pads = self.pad_input(x)
+        y = self.model(x)
+        y = self.crop_output(y, pads)
+        return y
+    
+    def load_pretrained(self, pretrained_path):
+        ckpt = torch.load(pretrained_path, map_location="cpu", weights_only=True)
+        # official MONAI way for SSL SwinUNETR encoder weights
+        self.model.load_from(ckpt)
+        print(f"Loaded encoder weights from {pretrained_path}")
+
+
+    def reset_decoder(self):
+        """
+        Reinitialize decoder / segmentation head while keeping pretrained encoder.
+        Good option if you want encoder transfer but task-specific decoder learning.
+        """
+        decoder_keywords = [
+            "decoder",
+            "decoder1",
+            "decoder2",
+            "decoder3",
+            "decoder4",
+            "decoder5",
+            "out",
+        ]
+
+        for name, module in self.model.named_modules():
+            lname = name.lower()
+            if any(k in lname for k in decoder_keywords):
+                for m in module.modules():
+                    if isinstance(m, (nn.Conv3d, nn.ConvTranspose3d, nn.Linear)):
+                        nn.init.kaiming_normal_(m.weight)
+                        if m.bias is not None:
+                            nn.init.zeros_(m.bias)
+                    elif isinstance(m, (nn.InstanceNorm3d, nn.BatchNorm3d, nn.GroupNorm)):
+                        if m.weight is not None:
+                            nn.init.ones_(m.weight)
+                        if m.bias is not None:
+                            nn.init.zeros_(m.bias)
+
+    def freeze_encoder(self):
+        """
+        Freeze the Swin encoder and leave decoder/head trainable.
+        """
+        for name, param in self.model.named_parameters():
+            if name.startswith("swinViT"):
+                param.requires_grad = False
+
+
