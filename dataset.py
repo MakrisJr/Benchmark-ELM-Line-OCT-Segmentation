@@ -14,6 +14,46 @@ from albumentations.pytorch import ToTensorV2
 import random
 
 
+def make_2d_transforms(train: bool, out_size=(256, 256)):
+    """
+    Returns Albumentations Compose object with 2D augmentations for training or validation.
+    - train=True: augmentation + resize + normalize + to tensor
+    - train=False: resize + normalize + to tensor (no augmentation)
+    """
+    resize = A.Resize(height=out_size[0], width=out_size[1], interpolation=cv2.INTER_LINEAR)
+
+    aug = A.Compose([
+        A.HorizontalFlip(p=0.5),
+        A.Affine(
+            translate_percent={"x": (-0.15, 0.15), "y": (-0.15, 0.15)},
+            scale=(0.90, 1.10),
+            rotate=(-20, 20),
+            p=0.7,
+            interpolation=0,
+            mask_interpolation=0,
+            border_mode=cv2.BORDER_CONSTANT,
+            fill=0,
+            fill_mask=0
+        ),
+        A.RandomBrightnessContrast(
+            brightness_limit=0.2,
+            contrast_limit=0.2,
+            p=0.5
+        ),
+        A.GaussNoise(
+            std_range=(0.01, 0.03),
+            mean_range=(0.0, 0.0),
+            per_channel=False,
+            p=0.3,
+        )
+    ], p=1.0)
+
+    normalize = A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    to_tensor = ToTensorV2()
+    if train:
+        return A.Compose([aug, resize, normalize, to_tensor])
+    else:
+        return A.Compose([resize, normalize, to_tensor])
 
 class BasicDataset(Dataset):
     def __init__(self, imgs_dir, masks_dir, scale=1,transform = None, single_channel = False):
@@ -90,7 +130,7 @@ class BasicDataset(Dataset):
         assert img.size == mask.size, \
             f'Image and mask {im_idx} should be the same size, but are {img.size} and {mask.size}'
         
-        mask = mask.convert('1')
+        mask = mask.convert('L')
         if self.single_channel:
             # Return a single-channel grayscale image (mode 'L')
             img = img.convert(mode='L')
@@ -98,9 +138,19 @@ class BasicDataset(Dataset):
             # Default behavior: return 3-channel RGB image
             img = img.convert(mode='RGB')
 
+        img = np.array(img)
+        mask = np.array(mask).astype(np.uint8)
+
         if self.transform:
-            img,mask=self.transform(img,mask)
-      
+            out = self.transform(image=img, mask=mask)
+            img, mask = out['image'], out['mask']
+
+        if torch.is_tensor(mask):
+            mask = (mask>0).float()
+            if mask.ndim == 2:
+                mask = mask.unsqueeze(0)
+        else:
+            mask = torch.from_numpy((mask>0).astype(np.float32)).unsqueeze(0)
         return {'image': img,'mask': mask}
     
 """
@@ -108,70 +158,6 @@ The 3D dataset stacks the 49 slices of the OCT into a 3D volume with dimensions 
 Image format is EYE_ID-SLICE_ID.png, where SLICE_ID is from 0 to 48. Slices are greyscale (single channel).
 
 """
-# class D3Dataset(Dataset): 
-#     def __init__(self, imgs_dir, masks_dir, scale=1,transform = None):
-#         self.imgs_dir = imgs_dir
-#         self.masks_dir = masks_dir
-#         self.scale = scale
-#         assert 0 < scale <= 1, 'Scale must be between 0 and 1'
-
-#         # Get unique eye IDs by removing the slice part
-#         all_files = [file for file in os.listdir(imgs_dir) if not file.startswith('.')]
-#         self.eye_ids = sorted(set('-'.join(file.split('-')[:-1]) for file in all_files))
-
-#         logging.info(f'Creating 3D dataset with {len(self.eye_ids)} examples')
-#         self.transform=transform
-#     def __len__(self):
-#         return len(self.eye_ids)
-#     @classmethod
-#     def preprocess(cls, pil_img, scale):
-#         w, h = pil_img.size
-#         newW, newH = int(scale * w), int(scale * h)
-#         assert newW > 0 and newH > 0, 'Scale is too small'
-#         pil_img = pil_img.resize((newW, newH))
-
-#         img_nd = np.array(pil_img)
-
-#         if len(img_nd.shape) == 2:
-#             img_nd = np.expand_dims(img_nd, axis=2)
-
-#         # HWC to CHW
-#         img_trans = img_nd.transpose((2, 0, 1))
-#         if img_trans.max() > 1:
-#             img_trans = img_trans / 255
-
-#         return img_trans
-#     def __getitem__(self, i):
-#         eye_id = self.eye_ids[i]
-#         img_slices = []
-#         mask_slices = []
-#         for slice_idx in range(49):  # Assuming 49 slices per eye
-#             img_file = os.path.join(self.imgs_dir, f"{eye_id}-{slice_idx}.png")
-#             mask_file = os.path.join(self.masks_dir, f"{eye_id}-{slice_idx}.png")
-#             try:
-#                 img = Image.open(img_file).convert(mode='L')  # Grayscale
-#                 mask = Image.open(mask_file).convert('1')  # Binary mask
-
-#                 if self.transform:
-#                     img, mask = self.transform(img, mask)
-
-#             except FileNotFoundError:
-#                 # logging.warning(f"Missing slice {slice_idx} for eye {eye_id}. Using last available slice.")
-#                 img = img_slices[-1]  # Use last available slice
-#                 mask = mask_slices[-1]  # Use last available slice
-
-
-#             img_slices.append(np.array(img)) # each slice is 1 x H x W
-#             mask_slices.append(np.array(mask))
-
-#         # Combine slices to create 3D volume
-#         img_volume = np.concatenate(img_slices, axis=0)  # 49 x H x W 
-#         mask_volume = np.concatenate(mask_slices, axis=0)  # 49 x H x W
-#         # print(f"img dimsions for eye {eye_id}:", img_volume.shape)
-
-#         return {'image': torch.tensor(img_volume, dtype=torch.float32).unsqueeze(0), # 1 x 49 x H x W
-#                 'mask': torch.tensor(mask_volume, dtype=torch.float32).unsqueeze(0)} # 1 x 49 x H x W
-
 class D3Dataset(Dataset): 
     def __init__(self, imgs_dir, masks_dir, scale=1, transform=None):
         self.imgs_dir = imgs_dir
@@ -316,9 +302,190 @@ class D3Dataset(Dataset):
 
         # Convert to torch tensor with channel dimension
         return {
-            'image': torch.tensor(img_volume, dtype=torch.float32).unsqueeze(0),
+            'image': torch.tensor(img_volume, dtype=torch.float32).unsqueeze(0), # dims are [1 x 49 x 256 x 256]
             'mask': torch.tensor(mask_volume / 255.0, dtype=torch.float32).unsqueeze(0) # also convert to binary
         }
 
     def __len__(self):
         return len(self.eye_ids)
+
+
+class D3WindowDataset(Dataset):
+    """
+    Returns K windows per volume.
+    Each window is 7 slices: image -> [K, 1, 7, H, W], mask -> [K, 1, 7, H, W]
+    """
+
+    def __init__(self, imgs_dir, masks_dir, transform=False, window_depth=7, K=1, return_all_windows=False):
+        self.imgs_dir = imgs_dir
+        self.masks_dir = masks_dir
+        self.transform = transform
+        self.window_depth = window_depth
+        self.K = K
+        self.D = 49  # total slices per volume
+        assert self.K >= 1, "K must be at least 1"
+        self.W = self.D - self.window_depth + 1 # possible window start positions (43 for depth=7)
+        self.return_all_windows = return_all_windows # ignores K and returns all windows
+
+        all_files = [file for file in os.listdir(imgs_dir) if not file.startswith('.')]
+        self.eye_ids = sorted(set('-'.join(file.split('-')[:-1]) for file in all_files))
+        logging.info(f'Creating windowed 3D dataset with {len(self.eye_ids)} volumes, {self.window_depth}-slice windows, K={self.K} windows per epoch')
+
+        self.resize = A.Compose([
+            A.Resize(256, 256, interpolation=cv2.INTER_NEAREST)
+        ])
+
+        # training dataset normalization params
+        self.mean = 0.2147
+        self.std = 0.2256
+
+    def __len__(self):
+        return len(self.eye_ids)
+    
+    def apply_volume_transform(self, img_volume, mask_volume):
+        """
+        Apply 3D-consistent geometric and photometric transforms across all slices.
+        """
+
+        # reverse slice order augmentation:
+        if random.random() < 0.5:
+            img_volume = img_volume[::-1].copy()
+            mask_volume = mask_volume[::-1].copy()
+
+        vol_transform = A.ReplayCompose([
+            A.HorizontalFlip(p=0.5),
+
+            A.Affine(
+                translate_percent={"x": (-0.15, 0.15), "y": (-0.15, 0.15)},
+                scale=(0.90, 1.10),
+                rotate=(-20, 20),
+                p=0.7,
+                interpolation=0,
+                mask_interpolation=0,
+                border_mode=cv2.BORDER_CONSTANT,
+                fill=0,
+                fill_mask=0
+            ),
+
+            A.RandomBrightnessContrast(
+                brightness_limit=0.2,
+                contrast_limit=0.2,
+                p=0.5
+            ),
+
+            A.GaussNoise(
+                std_range=(0.01, 0.03),
+                mean_range=(0.0, 0.0),
+                per_channel=False,
+                p=0.3,
+            )
+        ])
+
+        replay = vol_transform(image=img_volume[0], mask=mask_volume[0])['replay']
+
+        transformed_slices = []
+        transformed_masks = []
+        for img_slice, mask_slice in zip(img_volume, mask_volume):
+            out = A.ReplayCompose.replay(replay, image=img_slice, mask=mask_slice)
+            transformed_slices.append(out['image'])
+            transformed_masks.append(out['mask'])
+
+        return np.stack(transformed_slices), np.stack(transformed_masks)
+    
+    def _load_volume(self, eye_id):
+        """
+        Load all 49 slices for the given eye_id into a 3D volume.
+        """
+        img_slices = []
+        mask_slices = []
+
+        for slice_idx in range(49):
+            img_file = f"{self.imgs_dir}/{eye_id}-{slice_idx}.png"
+            mask_file = f"{self.masks_dir}/{eye_id}-{slice_idx}.png"
+            try:
+                # use 'L' mode for grayscale
+                img = Image.open(img_file).convert('L')
+                mask = Image.open(mask_file).convert('L')
+            except FileNotFoundError: # if slice is missing, repeat last slice
+                img = img_slices[-1]
+                mask = mask_slices[-1]
+
+            img_slices.append(np.array(img))
+            mask_slices.append(np.array(mask))
+
+        img_volume = np.stack(img_slices)
+        mask_volume = np.stack(mask_slices)
+        return img_volume, mask_volume # [49 x H x W], [49 x H x W]
+    
+    def _resize_volume(self, img_volume, mask_volume):
+        resized_imgs = []
+        resized_masks = []
+
+        for img_slice, mask_slice in zip(img_volume, mask_volume):
+            out = self.resize(image=img_slice, mask=mask_slice)
+            resized_imgs.append(out["image"])
+            resized_masks.append(out["mask"])
+
+        img_volume = np.stack(resized_imgs)
+        mask_volume = np.stack(resized_masks)
+        return img_volume, mask_volume # [49 x 256 x 256], [49 x 256 x 256]
+    
+    def _normalize_volume(self, img_volume):
+        img_volume = img_volume.astype(np.float32) / 255.0
+        img_volume = (img_volume - self.mean) / self.std
+        return img_volume # [49 x 256 x 256]
+    
+    def _sample_starts(self):
+        """
+        Sample K starting indices for windows of size window_depth within D=49 slices.
+        """
+        if self.K <= self.W:
+            return random.sample(range(self.W), self.K) # K samples without replacement.
+        else:
+            return [random.randint(0, self.W - 1) for _ in range(self.K)] # with replacement.
+
+    def __getitem__(self, i):
+        eye_id = self.eye_ids[i]
+        img_volume, mask_volume = self._load_volume(eye_id) # [49 x H x W], [49 x H x W]
+
+        # Apply transforms
+        if self.transform:
+            img_volume, mask_volume = self.apply_volume_transform(img_volume, mask_volume)
+
+        # Resize (regardless of augmentations)
+        img_volume, mask_volume = self._resize_volume(img_volume, mask_volume) # [49 x 256 x 256], [49 x 256 x 256]
+        
+        # Normalize
+        img_volume = self._normalize_volume(img_volume) # [49 x 256 x 256]
+
+        # Binarize masks
+        mask_volume = (mask_volume > 127).astype(np.uint8) # [49 x 256 x 256]
+
+        # Sample K windows or return all windows
+        if self.return_all_windows:
+            starts = list(range(self.W)) # all possible starting indices 0..42
+        else:
+            starts = self._sample_starts() # K starting indices
+        img_windows = []
+        mask_windows = []
+
+        for start in starts:
+            end = start + self.window_depth
+            img_window = img_volume[start:end] # [window_depth x 256 x 256]
+            mask_window = mask_volume[start:end] # [window_depth x 256 x 256]
+
+            img_windows.append(img_window)
+            mask_windows.append(mask_window)
+
+        # Stack windows into tensors
+        x = np.stack(img_windows, axis=0) # [K x window_depth x 256 x 256]
+        y = np.stack(mask_windows, axis=0) # [K x window_depth x 256 x 256]
+
+        x = torch.tensor(x, dtype=torch.float32).unsqueeze(1) # [K x 1 x window_depth x 256 x 256]
+        y = torch.tensor(y, dtype=torch.float32).unsqueeze(1) # [K x 1 x window_depth x 256 x 256]
+
+        return {
+            'image': x, # [K x 1 x window_depth x 256 x 256]
+            'mask': y,   # [K x 1 x window_depth x 256 x 256]
+            'eye_id': eye_id
+        }
