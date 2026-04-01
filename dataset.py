@@ -12,6 +12,8 @@ import cv2
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import random
+from pathlib import Path
+import pandas as pd
 
 
 def make_2d_transforms(train: bool, out_size=(256, 256)):
@@ -216,29 +218,40 @@ class BasicDataset(Dataset):
         valid_rows = []
         for _, row in df.iterrows():
             pid = row["patient_id"]
-            img_path = self.image_dir / f"{pid}{self.image_ext}"
-            mask_path = self.mask_dir / f"{pid}{self.mask_ext}"
 
-            if not img_path.exists():
-                logging.warning(f"Skipping {pid}: image not found at {img_path}")
-                continue
-            if not mask_path.exists():
-                logging.warning(f"Skipping {pid}: mask not found at {mask_path}")
+            # Dataset convention: per-slice 2D images and masks
+            # e.g. 572-0.png .. 572-48.png (or similar)
+            img_paths = sorted(self.image_dir.glob(f"{pid}-*{self.image_ext}"))
+            if not img_paths:
+                logging.warning(
+                    f"Skipping {pid}: no images found matching {pid}-*{self.image_ext} in {self.image_dir}"
+                )
                 continue
 
-            valid_rows.append(
-                {
-                    "patient_id": pid,
-                    "fold": int(row["fold"]),
-                    "image_path": img_path,
-                    "mask_path": mask_path,
-                }
-            )
+            n_added = 0
+            for img_path in img_paths:
+                mask_path = self.mask_dir / img_path.name
+                if not mask_path.exists():
+                    logging.warning(f"Skipping {img_path.name}: mask not found at {mask_path}")
+                    continue
+
+                valid_rows.append(
+                    {
+                        "patient_id": pid,
+                        "fold": int(row["fold"]),
+                        "image_path": img_path,
+                        "mask_path": mask_path,
+                    }
+                )
+                n_added += 1
+
+            if n_added == 0:
+                logging.warning(f"Skipping {pid}: no valid (image, mask) slice pairs found")
 
         self.meta = pd.DataFrame(valid_rows).reset_index(drop=True)
 
         logging.info(
-            f"Creating dataset with {len(self.meta)} examples "
+            f"Creating dataset with {len(self.meta)} examples."
             f"(root={self.root_dir}, split={split}, fold={fold})"
         )
 
@@ -271,6 +284,13 @@ class BasicDataset(Dataset):
         patient_id = row["patient_id"]
         img_path = row["image_path"]
         mask_path = row["mask_path"]
+
+        # Slice index is encoded in filename like "841-0.png"
+        image_name = Path(img_path).name
+        stem = Path(img_path).stem
+        parts = stem.split("-", 1)
+        slice_idx = int(parts[1])
+
 
         img = Image.open(img_path)
         mask = Image.open(mask_path)
@@ -321,6 +341,8 @@ class BasicDataset(Dataset):
         return {
             "patient_id": patient_id,
             "fold": int(row["fold"]),
+            "image_name": image_name,
+            "slice_idx": slice_idx,
             "image": img,
             "mask": mask,
         }
