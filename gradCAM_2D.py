@@ -3,7 +3,7 @@ import argparse
 import numpy as np
 import cv2
 from PIL import Image
-from dataset import make_2d_transforms
+from elm.dataset import make_2d_transforms
 
 import torch
 import torch.nn as nn
@@ -11,7 +11,7 @@ import torch.nn as nn
 from pytorch_grad_cam import GradCAM
 from pytorch_grad_cam.utils.image import show_cam_on_image
 
-from model import (
+from elm.model import (
     U_Net, AttU_Net, LinkNetImprove, U2NETP, R2U_Net,
     DeepLabv3_plus, FCN, SegNet, SwinEncoderUNet2D
 )

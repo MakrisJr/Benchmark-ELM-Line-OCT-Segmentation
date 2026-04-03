@@ -24,13 +24,13 @@ import torch.nn as nn
 from torch import optim
 from tqdm import tqdm
 from torchvision import transforms
-from eval import eval_net
-from model import U_Net,AttU_Net,LinkNetImprove,U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet, SwinEncoderUNet2D
-from transformation import ELM_transform
+from elm.eval import eval_net
+from elm.model import U_Net,AttU_Net,LinkNetImprove,U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet, SwinEncoderUNet2D
+from elm.transformation import ELM_transform
 from tensorboardX import SummaryWriter
-from dataset import BasicDataset, make_2d_transforms
+from elm.dataset import BasicDataset, make_2d_transforms
 from torch.utils.data import DataLoader, random_split
-from dice_loss import dice_loss
+from elm.dice_loss import dice_loss
 import torch.nn.functional as F
 from efficientunet import *
 import matplotlib.pyplot as plt

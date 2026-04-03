@@ -23,10 +23,10 @@ from torch import optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dataset import D3Dataset
-from dice_loss import dice_loss
-from eval import eval_net
-from model import (
+from elm.dataset import D3Dataset
+from elm.dice_loss import dice_loss
+from elm.eval import eval_net
+from elm.model import (
     CSAM_UNet2p5D,
     SwinUNETR3D,
     UNet2DEnc3DDec,

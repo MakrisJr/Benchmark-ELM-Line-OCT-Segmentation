@@ -28,11 +28,17 @@ The codebase now supports two related workflows:
 - 2D ELM segmentation from individual OCT slices
 - 3D ELM segmentation from full OCT volumes assembled from 49 slices per eye
 
+Repository layout:
+
+- `elm/` contains the reusable package code such as datasets, models, evaluation helpers, losses, and transforms
+- top-level scripts such as `train.py`, `new-train.py`, `predict_cv2d.py`, and `predict_cv3d.py` remain as runnable entry points
+
 Common patterns used across the updated code:
 
 - dataset splits are read from `data_no_anomalies/metadata.csv`
 - checkpoints are saved fold-by-fold under `elm-results/<model_name>/fold_<k>/checkpoints/`
 - evaluation scripts write CSV summaries suitable for later statistical analysis
+- reusable Python modules now live in the `elm/` package and are imported as `elm.*`
 
 ## Dataset Layout
 
@@ -61,6 +67,19 @@ Expected conventions:
 
 ## Main Scripts
 
+The repository is now split into:
+
+- `elm/`: reusable package code
+- top-level `*.py` scripts: runnable entry points for training, inference, analysis, and utilities
+
+If you are importing code from this project, prefer imports such as:
+
+```python
+from elm.dataset import D3Dataset
+from elm.model import SwinUNETR3D
+from elm.eval import eval_net
+```
+
 ### Training
 
 - `train.py`: 2D training with cross-validation support for models such as `SegNet`, `U_Net`, `R2U_Net`, `DeepLabv3_plus`, and `SwinEncoderUNet2D`
@@ -75,10 +94,11 @@ Expected conventions:
 
 ### Data And Core Components
 
-- `dataset.py`: 2D and 3D dataset classes, metadata-based split logic, transforms, and volume assembly
-- `model.py`: 2D, 2.5D, and 3D segmentation models used throughout the project
-- `dice_loss.py`: Dice coefficient and Dice loss
-- `eval.py`: validation helper used during training
+- `elm/dataset.py`: 2D and 3D dataset classes, metadata-based split logic, transforms, and volume assembly
+- `elm/model.py`: 2D, 2.5D, and 3D segmentation models used throughout the project
+- `elm/dice_loss.py`: Dice coefficient and Dice loss
+- `elm/eval.py`: validation helpers used during training
+- `elm/transformation.py`: legacy and auxiliary transform utilities
 
 ### Analysis And Utilities
 
@@ -96,6 +116,8 @@ conda env create -f environment.yml
 ```
 
 The older project notes referenced CUDA 10 and earlier PyTorch versions, but the current repository has evolved beyond that original minimal setup. In practice, you should treat `environment.yml` as the authoritative starting point.
+
+From the repository root, the top-level scripts should work directly because they import from the local `elm` package.
 
 ## Quick Start
 
@@ -170,4 +192,3 @@ If you use this repository, please cite the original benchmark paper:
   publisher={Newcastle University}
 }
 ```
-

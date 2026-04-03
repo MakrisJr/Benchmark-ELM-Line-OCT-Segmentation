@@ -7,8 +7,8 @@ import cv2
 from tqdm import tqdm
 import  csv
 
-from dataset import D3Dataset
-from model import CSAM_UNet2p5D, UNet3DFrawley, UNet2DEnc3DDec, UNet3D, UNet3D_Aniso, UNet2p5D_SlidingWindow, SwinUNETR3D
+from elm.dataset import D3Dataset
+from elm.model import CSAM_UNet2p5D, UNet3DFrawley, UNet2DEnc3DDec, UNet3D, UNet3D_Aniso, UNet2p5D_SlidingWindow, SwinUNETR3D
 from scipy import ndimage as ndi
 
 EXPORT_ONLY = True

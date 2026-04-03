@@ -9,8 +9,8 @@ from PIL import Image
 from torchvision import transforms
 from torch.autograd import Variable
 from efficientunet import *
-from dice_loss import dice_coeff
-from model import SwinEncoderUNet2D, U_Net,AttU_Net, LinkNetImprove, U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet
+from elm.dice_loss import dice_coeff
+from elm.model import SwinEncoderUNet2D, U_Net,AttU_Net, LinkNetImprove, U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet
 import re
 from collections import defaultdict
 import csv
@@ -502,4 +502,3 @@ else:
 
 
 print("====================\n")
-

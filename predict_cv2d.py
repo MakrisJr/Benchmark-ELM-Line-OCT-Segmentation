@@ -10,8 +10,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from dataset import BasicDataset, make_2d_transforms
-from model import (
+from elm.dataset import BasicDataset, make_2d_transforms
+from elm.model import (
     U_Net,
     AttU_Net,
     LinkNetImprove,

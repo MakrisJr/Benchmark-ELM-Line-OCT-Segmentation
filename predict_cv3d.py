@@ -8,8 +8,8 @@ import torch
 from scipy import ndimage as ndi
 from torch.utils.data import DataLoader
 
-from dataset import D3Dataset
-from model import (
+from elm.dataset import D3Dataset
+from elm.model import (
     CSAM_UNet2p5D,
     SwinUNETR3D,
     UNet2DEnc3DDec,
