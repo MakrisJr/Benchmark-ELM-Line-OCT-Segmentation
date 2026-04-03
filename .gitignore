@@ -21,3 +21,11 @@ nnUNet_raw/
 eval-window-outputs/*
 data_no_anomalies/all/image/*
 data_no_anomalies/all/mask/*
+anomaly.ipynb
+holes_detection.py
+image_annotation2d_correction.py
+image_annotations_tk_2d.py
+line_check.py
+match.py
+split_data.ipynb
+tif2npy.py
