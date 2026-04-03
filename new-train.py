@@ -1,357 +1,467 @@
-'''
-This code is written by:
+"""
+3D ELM line segmentation training with 5-fold cross validation.
 
-Dr. Vivek Kumar Singh
-Department of Computer Science
-Newcastle University, United Kingdom
-Date: 24/August/2021
+This combines:
+- the fold orchestration style from train.py
+- the 3D model and optimizer handling from the earlier new-train.py
+- the metadata-based split logic used across the newer dataset code
+"""
 
-Also, thanks to "https://github.com/milesial/" for utilzing some of their codes.
-
-'''
 import argparse
+import copy
+import csv
 import logging
 import os
 import sys
-import copy
 import time
+
 import numpy as np
 import torch
 import torch.nn as nn
-from torch import optim
-from tqdm import tqdm
-from torchvision import transforms
-from eval import eval_net
-from model import U_Net,AttU_Net,LinkNetImprove,U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet, UNet2, UNet2D_attention, UNet3D, UNet3D_Aniso, UNet3D_Aniso2, UNet3DFrawley, MGUNet_2, UNet2DEnc3DDec, CSAM_UNet2p5D, UNet2p5D_SlidingWindow, SwinUNETR3D
-from transformation import ELM_transform, ELM_transform_gray
 from tensorboardX import SummaryWriter
-from dataset import BasicDataset, D3Dataset
-from torch.utils.data import DataLoader, random_split
+from torch import optim
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from dataset import D3Dataset
 from dice_loss import dice_loss
-import torch.nn.functional as F
-from efficientunet import *
-import matplotlib.pyplot as plt
-import csv
+from eval import eval_net
+from model import (
+    CSAM_UNet2p5D,
+    SwinUNETR3D,
+    UNet2DEnc3DDec,
+    UNet2p5D_SlidingWindow,
+    UNet3D,
+    UNet3D_Aniso,
+    UNet3D_Aniso2,
+    UNet3DFrawley,
+)
 
 
-def tversky_loss(prob, target, alpha=0.3, beta=0.7, smooth=1e-6):
-    """
-    prob: sigmoid(logits), shape = [B, 1, ...]
-    target: ground truth mask, shape = [B, 1, ...]
-    """
-    prob = prob.float()
-    target = target.float()
-    
-    dims = tuple(range(2, prob.ndim))
-    
-    tp = torch.sum(prob * target, dims)
-    fp = torch.sum(prob * (1 - target), dims)
-    fn = torch.sum((1 - prob) * target, dims)
-
-    tversky = (tp + smooth) / (tp + alpha * fp + beta * fn + smooth)
-    return 1 - tversky.mean()
-
-def tv_smoothness_z(prob: torch.Tensor, mask: torch.Tensor = None):
-    """
-    prob: B x 1 x D x H x W (after sigmoid)
-    mask: same shape, 1 where smoothness applies
-    """
-    dz = torch.abs(prob[:, :, 1:, :, :] - prob[:, :, :-1, :, :])
-
-    if mask is not None:
-        mz = mask[:, :, 1:, :, :] * mask[:, :, :-1, :, :]
-        dz = dz * mz
-
-    return dz.mean()
+def mb(x):
+    return x / 1024**2
 
 
-def train_net(net,
-              device,
-              epochs=15,
-              batch_size=4,
-              lr=0.0001,
-              save_cp=True,
-              img_scale=1,
-              args=None):
-    
-    model_name = args.model_name
-    base_dir = args.base_dir
-    train_dir_img = os.path.join(base_dir, 'data_no_anomalies/train/image/')
-    train_dir_mask = os.path.join(base_dir, 'data_no_anomalies/train/mask/')
-    val_dir_img = os.path.join(base_dir, 'data_no_anomalies/val/image/')
-    val_dir_mask = os.path.join(base_dir, 'data_no_anomalies/val/mask/')
-    dir_checkpoint = os.path.join(base_dir, 'elm-results/', model_name, 'checkpoints/')
-    
-    transform_train = True
-    transform_val = False
-    train_dataset = D3Dataset(train_dir_img, train_dir_mask, img_scale, transform = transform_train)
-    val_dataset= D3Dataset(val_dir_img, val_dir_mask, img_scale, transform = transform_val)
-
-    n_train=len(train_dataset)
-    n_val=len(val_dataset)
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+def print_gpu_mem(device=None, prefix=""):
+    if not torch.cuda.is_available():
+        print(prefix + "No CUDA device")
+        return
+    if device is None:
+        device = torch.cuda.current_device()
+    torch.cuda.synchronize(device)
+    allocated = torch.cuda.memory_allocated(device)
+    reserved = torch.cuda.memory_reserved(device)
+    max_alloc = torch.cuda.max_memory_allocated(device)
+    print(
+        f"{prefix}GPU {device} allocated: {mb(allocated):.1f} MB, "
+        f"reserved: {mb(reserved):.1f} MB, peak_alloc: {mb(max_alloc):.1f} MB"
+    )
+    print(torch.cuda.memory_summary(device=device, abbreviated=True))
 
 
-    writer = SummaryWriter(logdir=os.path.join(args.experiment_dir, 'logs'), comment=f'LR_{lr}_BS_{batch_size}_SCALE_{img_scale}')
-    print('TensorBoard logs writing to:', writer.logdir)
-    global_step = 0
+def build_model(args):
+    if args.model == "UNet3D":
+        return UNet3D(in_channels=1, out_channels=1)
+    if args.model == "UNet3D_Aniso":
+        return UNet3D_Aniso(in_channels=1, out_channels=1)
+    if args.model == "UNet3D_Aniso2":
+        return UNet3D_Aniso2(in_channels=1, out_channels=1)
+    if args.model == "UNet3DFrawley":
+        return UNet3DFrawley(in_channels=1, out_channels=1)
+    if args.model == "UNet2DEnc3DDec":
+        return UNet2DEnc3DDec(in_channels=1, out_channels=1)
+    if args.model == "CSAM_UNet2p5D":
+        return CSAM_UNet2p5D(
+            in_channels=1,
+            out_channels=1,
+            num_layers=3,
+            base_num=32,
+            semantic=True,
+            positional=True,
+            slice_att=True,
+        )
+    if args.model == "UNet2p5D_SlidingWindow":
+        return UNet2p5D_SlidingWindow(
+            k=args.window_k,
+            out_channels=1,
+            num_layers=3,
+            base_num=32,
+            pad_mode="replicate",
+        )
+    if args.model == "SwinUNETR3D":
+        pretrained_path = args.pretrained_path
+        if pretrained_path and not os.path.exists(pretrained_path):
+            logging.warning(
+                f"Pretrained path {pretrained_path} was not found. "
+                "Continuing without pretrained encoder weights."
+            )
+            pretrained_path = None
+        return SwinUNETR3D(
+            in_channels=1,
+            n_classes=1,
+            pretrained_path=pretrained_path,
+        )
+    raise ValueError(f"Unknown 3D model '{args.model}'")
 
-    logging.info(f'''Starting training:
-        Epochs:          {epochs}
-        Batch size:      {batch_size}
-        Learning rate:   {lr}
-        Training size:   {n_train}
-        Validation size: {n_val}
-        Checkpoints:     {save_cp}
-        Device:          {device.type}
-        Images scaling:  {img_scale}
-        Experiment dir: {args.experiment_dir}
-    ''')
 
-# !!---------- Defined the optimizer --------------------------!!
+def build_optimizer(net, lr):
     if net.__class__.__name__.startswith("SwinUNETR"):
         encoder_params = []
         decoder_params = []
-
         for name, param in net.model.named_parameters():
             if name.startswith("swinViT"):
                 encoder_params.append(param)
             else:
                 decoder_params.append(param)
 
-        print("encoder tensors:", len(encoder_params))
-        print("decoder/head tensors:", len(decoder_params))
-        optimizer = torch.optim.AdamW(
+        logging.info(
+            f"SwinUNETR parameter groups: encoder={len(encoder_params)} decoder={len(decoder_params)}"
+        )
+        return torch.optim.AdamW(
             [
                 {"params": encoder_params, "lr": 1e-5},
                 {"params": decoder_params, "lr": 1e-4},
             ],
             weight_decay=1e-5,
         )
-    else:
-        optimizer = optim.Adam(net.parameters(), lr = lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-9)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.2, patience=10
+
+    return optim.Adam(
+        net.parameters(),
+        lr=lr,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=1e-9,
     )
-# ------------------ Loss function ------------------!!
-    criterion_dice = dice_loss
-    criterion = nn.BCEWithLogitsLoss().to(device=device)
-    # criterion_tversky = tversky_loss
-    
-# !!-------------- Training and validation loop ------------------!!
-    best_acc=0
-    csv_path = os.path.join(args.experiment_dir, 'training_log.csv')
-    with open(csv_path, mode='w', newline='') as csv_file:
+
+
+def make_dataloaders(args):
+    data_root = os.path.join(args.base_dir, "data_no_anomalies")
+    train_dataset = D3Dataset(
+        root_dir=data_root,
+        split="train",
+        fold=args.fold,
+        scale=args.scale,
+        transform=True,
+    )
+    val_dataset = D3Dataset(
+        root_dir=data_root,
+        split="val",
+        fold=args.fold,
+        scale=args.scale,
+        transform=False,
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batchsize,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=False,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batchsize,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=False,
+    )
+    return train_dataset, val_dataset, train_loader, val_loader
+
+
+def train_net(net, device, args):
+    train_dataset, val_dataset, train_loader, val_loader = make_dataloaders(args)
+    n_train = len(train_dataset)
+    n_val = len(val_dataset)
+
+    writer = SummaryWriter(
+        logdir=os.path.join(args.experiment_dir, "logs"),
+        comment=f"LR_{args.lr}_BS_{args.batchsize}_{args.model}_fold_{args.fold}",
+    )
+    logging.info(f"TensorBoard logs writing to: {writer.logdir}")
+
+    logging.info(
+        f"""Starting training:
+        Fold:            {args.fold}
+        Epochs:          {args.epochs}
+        Batch size:      {args.batchsize}
+        Learning rate:   {args.lr}
+        Training size:   {n_train}
+        Validation size: {n_val}
+        Device:          {device.type}
+        Images scaling:  {args.scale}
+        Experiment dir:  {args.experiment_dir}
+    """
+    )
+
+    optimizer = build_optimizer(net, args.lr)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.2, patience=10
+    )
+    criterion_bce = nn.BCEWithLogitsLoss().to(device=device)
+
+    csv_path = os.path.join(args.experiment_dir, "training_log.csv")
+    with open(csv_path, mode="w", newline="") as csv_file:
         writer_csv = csv.writer(csv_file)
-        writer_csv.writerow(['epoch', 'train_loss', 'val_dice', 'learning_rate'])
+        writer_csv.writerow(["epoch", "train_loss", "val_dice", "learning_rate"])
 
-    for epoch in range(epochs):
+    global_step = 0
+    best_score = float("-inf")
+    best_epoch = -1
+    best_model_wts = copy.deepcopy(net.state_dict())
+
+    for epoch in range(args.epochs):
         net.train()
-        epoch_loss = 0
+        epoch_loss = 0.0
 
-        with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs - 1}', unit='img') as pbar:
+        with tqdm(
+            total=n_train,
+            desc=f"Fold {args.fold} | Epoch {epoch + 1}/{args.epochs}",
+            disable=not sys.stdout.isatty(),
+            unit="vol",
+        ) as pbar:
             for ibatch, batch in enumerate(train_loader):
-                imgs = batch['image']
-                true_masks = batch['mask']
-                imgs = imgs.to(device=device, dtype=torch.float32)
-                mask_type = torch.float32 if net.n_classes == 1 else torch.long
-                true_masks = true_masks.to(device=device, dtype=mask_type)
+                imgs = batch["image"].to(device=device, dtype=torch.float32)
+                true_masks = batch["mask"].to(device=device, dtype=torch.float32)
 
-                # print(f"Input image size:", imgs.size())
-
-                masks_pred = net(imgs) 
-                out_new =  torch.sigmoid(masks_pred)
-
-                loss = 0.5*criterion(masks_pred, true_masks) + 0.5*criterion_dice(out_new, true_masks)
-                epoch_loss += loss.item()
-
-                writer.add_scalar('Loss/train_batch', loss.item(), global_step)
-                pbar.set_postfix(**{'loss (batch)': loss.item()})
+                masks_pred = net(imgs)
+                prob = torch.sigmoid(masks_pred)
+                loss = 0.5 * criterion_bce(masks_pred, true_masks) + 0.5 * dice_loss(
+                    prob, true_masks
+                )
 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0) # clip_grad_norm_ more stable than clip_grad_value_, for 3D networks.
+                nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
                 optimizer.step()
 
-                if epoch == 0 and ibatch == 1:
-                    print_gpu_mem(device)
+                epoch_loss += float(loss.item())
+                writer.add_scalar("Loss/train_batch", loss.item(), global_step)
+                pbar.set_postfix(**{"loss (batch)": loss.item()})
                 pbar.update(imgs.shape[0])
                 global_step += 1
 
+                if epoch == 0 and ibatch == 1:
+                    print_gpu_mem(device)
 
+        epoch_loss_avg = epoch_loss / max(1, len(train_loader))
+        val_score = eval_net(net, val_loader, device)
+        scheduler.step(val_score)
+        current_lr = optimizer.param_groups[0]["lr"]
 
-            epoch_loss_avg = epoch_loss / max(1, len(train_loader))
+        writer.add_scalar("Loss/train_epoch", epoch_loss_avg, epoch)
+        writer.add_scalar("Dice/val_epoch", val_score, epoch)
+        writer.add_scalar("learning_rate_epoch", current_lr, epoch)
 
-            # Validation once per epoch:
-            with torch.no_grad():
-                val_score = eval_net(net, val_loader, device)
-            
-            scheduler.step(val_score) # step the scheduler based on validation score
-            current_lr = optimizer.param_groups[0]['lr']
-
-            # TensorBoard logging
-            writer.add_scalar('Loss/train_epoch', epoch_loss_avg, epoch)
-            if net.n_classes == 1: 
-                writer.add_scalar('Dice/val_epoch', val_score, epoch)
-            else:
-                writer.add_scalar('Loss/val_epoch', val_score, epoch)
-            writer.add_scalar('learning_rate_epoch', current_lr, epoch)
-            # optional - histograms of weights and gradients
-            if (epoch + 1) % 5 == 0: # can change to log every N epochs
-                for tag, value in net.named_parameters():
-                    tag = tag.replace('.', '/')
-                    writer.add_histogram('weights/' + tag, value.data.cpu().numpy(), epoch)
-            # log images:
-            if imgs.dim() == 5:
-                B,C,D,H,W = imgs.shape
-                # permute to (B, D, C, H, W) then flatten B and D into the batch dim
-                imgs_to_write = imgs.permute(0, 2, 1, 3, 4).reshape(B * D, C, H, W)
-                true_masks_to_write = true_masks.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
-                masks_pred_to_write = masks_pred.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
-            else:
-                imgs_to_write = imgs
-                true_masks_to_write = true_masks
-                masks_pred_to_write = masks_pred
-
-            writer.add_images('images', imgs_to_write, epoch)
-            if net.n_classes == 1:
-                writer.add_images('masks/true', true_masks_to_write, epoch)
-                writer.add_images('masks/pred', (torch.sigmoid(masks_pred_to_write) > 0.5).float(), epoch)
-            
-            if val_score > best_acc:
-                best_acc = val_score
-                best_model_wts = copy.deepcopy(net.state_dict())
-                best_epoch = epoch
-
-            # CSV logging:
-            with open(csv_path, mode='a', newline='') as csv_file:
-                writer_csv = csv.writer(csv_file)
-                writer_csv.writerow([epoch, epoch_loss_avg, val_score, current_lr])
-
-            logging.info(
-                f"Epoch {epoch}/{epochs-1} | "
-                f"TrainLoss={epoch_loss_avg:.6f} | ValScore={float(val_score):.6f} | LR={current_lr:.2e}"
+        if "imgs" in locals():
+            B, C, D, H, W = imgs.shape
+            imgs_to_write = imgs.permute(0, 2, 1, 3, 4).reshape(B * D, C, H, W)
+            true_masks_to_write = true_masks.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
+            masks_pred_to_write = masks_pred.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
+            writer.add_images("images", imgs_to_write, epoch)
+            writer.add_images("masks/true", true_masks_to_write, epoch)
+            writer.add_images(
+                "masks/pred",
+                (torch.sigmoid(masks_pred_to_write) > 0.5).float(),
+                epoch,
             )
 
+        if (epoch + 1) % 5 == 0:
+            for tag, value in net.named_parameters():
+                tag = tag.replace(".", "/")
+                writer.add_histogram("weights/" + tag, value.data.cpu().numpy(), epoch)
 
-    if save_cp:
-        try:
-            os.makedirs(os.path.join(dir_checkpoint), exist_ok=True)
-            logging.info('Created checkpoint directory')
-        except OSError:
-            print("Error: did not save checkpoint")
-            pass
-        net.load_state_dict(best_model_wts)
-        torch.save(net.state_dict(), '{}/checkpoints/{}_best_epoch_{}.pth'.format(args.experiment_dir, model_name, best_epoch))
-        logging.info(f'Checkpoint {best_epoch} saved !')
+        if val_score > best_score:
+            best_score = float(val_score)
+            best_epoch = epoch
+            best_model_wts = copy.deepcopy(net.state_dict())
+
+        with open(csv_path, mode="a", newline="") as csv_file:
+            writer_csv = csv.writer(csv_file)
+            writer_csv.writerow([epoch, epoch_loss_avg, float(val_score), current_lr])
+
+        logging.info(
+            f"Fold {args.fold} | Epoch {epoch}/{args.epochs - 1} | "
+            f"TrainLoss={epoch_loss_avg:.6f} | ValDice={float(val_score):.6f} | "
+            f"LR={current_lr:.2e}"
+        )
+
+    os.makedirs(os.path.join(args.experiment_dir, "checkpoints"), exist_ok=True)
+    net.load_state_dict(best_model_wts)
+    ckpt_path = os.path.join(
+        args.experiment_dir,
+        "checkpoints",
+        f"{args.model_name}_fold_{args.fold}_best_epoch_{best_epoch}.pth",
+    )
+    torch.save(net.state_dict(), ckpt_path)
+    logging.info(f"Checkpoint saved to {ckpt_path}")
 
     writer.close()
+    return best_score, best_epoch
+
 
 def get_args():
-    parser = argparse.ArgumentParser(description='2D ELM line segmentation from OCT images',
-                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-e', '--epochs', metavar='E', type=int, default=100,
-                        help='Number of epochs', dest='epochs')
-    parser.add_argument('-b', '--batch-size', metavar='B', type=int, nargs='?', default=2,
-                        help='Batch size', dest='batchsize')
-    parser.add_argument('-l', '--learning-rate', metavar='LR', type=float, nargs='?', default=0.0002,
-                        help='Learning rate', dest='lr')
-    parser.add_argument('-f', '--load', dest='load', type=str, default=False,
-                        help='Load model from a .pth file')
-    parser.add_argument('-s', '--scale', dest='scale', type=float, default=1,
-                        help='Downscaling factor of the images')
-    parser.add_argument('-v', '--validation', dest='val', type=float, default=15.0,
-                        help='Percent of the data that is used as validation (0-100)')
-    parser.add_argument('-d', '--base_dir', dest='base_dir', type=str, default='./',
-                        help='Base files directory')
-
+    parser = argparse.ArgumentParser(
+        description="3D ELM line segmentation from OCT volumes with 5-fold CV",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="SwinUNETR3D",
+        choices=[
+            "UNet3D",
+            "UNet3D_Aniso",
+            "UNet3D_Aniso2",
+            "UNet3DFrawley",
+            "UNet2DEnc3DDec",
+            "CSAM_UNet2p5D",
+            "UNet2p5D_SlidingWindow",
+            "SwinUNETR3D",
+        ],
+        help="3D model architecture to train",
+    )
+    parser.add_argument(
+        "-e", "--epochs", metavar="E", type=int, default=100, dest="epochs"
+    )
+    parser.add_argument(
+        "-b", "--batch-size", metavar="B", type=int, default=2, dest="batchsize"
+    )
+    parser.add_argument(
+        "-l", "--learning-rate", metavar="LR", type=float, default=0.0002, dest="lr"
+    )
+    parser.add_argument(
+        "-f",
+        "--load",
+        dest="load",
+        type=str,
+        default="",
+        help="Load model weights from a .pth file before training",
+    )
+    parser.add_argument(
+        "-s",
+        "--scale",
+        dest="scale",
+        type=float,
+        default=1.0,
+        help="Downscaling factor applied before the final resize",
+    )
+    parser.add_argument(
+        "-d",
+        "--base-dir",
+        dest="base_dir",
+        type=str,
+        default="./",
+        help="Base files directory",
+    )
+    parser.add_argument(
+        "--fold", type=int, default=0, help="Validation fold index (0..4)"
+    )
+    parser.add_argument(
+        "--num-folds", type=int, default=5, help="Number of CV folds"
+    )
+    parser.add_argument(
+        "--run-all-folds",
+        dest="run_all_folds",
+        action="store_true",
+        help="Run all folds sequentially",
+    )
+    parser.add_argument(
+        "--single-fold",
+        dest="run_all_folds",
+        action="store_false",
+        help="Train only the fold given by --fold",
+    )
+    parser.set_defaults(run_all_folds=True)
+    parser.add_argument(
+        "--num-workers", type=int, default=2, help="DataLoader worker count"
+    )
+    parser.add_argument(
+        "--window-k",
+        type=int,
+        default=7,
+        help="Sliding-window depth for UNet2p5D_SlidingWindow",
+    )
+    parser.add_argument(
+        "--pretrained-path",
+        type=str,
+        default="./checkpoint/model_swinvit_UNETR.pt",
+        help="Optional pretrained encoder weights for SwinUNETR3D",
+    )
     return parser.parse_args()
 
 
-def mb(x): return x / 1024**2
-
-def print_gpu_mem(device=None, prefix=''):
-    if not torch.cuda.is_available():
-        print(prefix + 'No CUDA device')
-        return
-    if device is None:
-        device = torch.cuda.current_device()
-    torch.cuda.synchronize(device)
-    allocated = torch.cuda.memory_allocated(device)        # memory currently allocated by tensors
-    reserved  = torch.cuda.memory_reserved(device)         # memory managed by the caching allocator
-    max_alloc  = torch.cuda.max_memory_allocated(device)   # peak allocated by tensors
-    print(f"{prefix}GPU {device} allocated: {mb(allocated):.1f} MB, "
-          f"reserved: {mb(reserved):.1f} MB, peak_alloc: {mb(max_alloc):.1f} MB")
-    # optional: a readable summary
-    print(torch.cuda.memory_summary(device=device, abbreviated=True))
-
-
-
-if __name__ == '__main__':
-
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     args = get_args()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logging.info(f'Using device {device}') 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logging.info(f"Using device {device}")
 
-    n_classes =1 # number of output classes
-    n_channels = 1 # number of input channels (1 for grayscale, 3 for RGB)
+    timestamp = time.strftime("%b-%d-%Y_%H%M")
+    model_name = f"{args.model}_{timestamp}_model"
+    model_root = os.path.join(args.base_dir, "elm-results", model_name)
+    os.makedirs(model_root, exist_ok=True)
 
+    def run_single_fold(fold_idx):
+        net = build_model(args)
+        net.to(device=device)
 
-# -------------- Load the model -----------
-    #net = get_efficientunet_b3(n_classes=1, concat_input=True, pretrained=True)
-    #net = LinkNetImprove(n_channels=3, n_classes=1)
-    #net = AttU_Net(n_channels=3, n_classes=1)
-    #net = U_Net(n_channels=3, n_classes=1)
-    #net = R2U_Net(n_channels=3, n_classes=1,t=2)
-    #net = DeepLabv3_plus(n_channels=3, n_classes=1, os=16, pretrained=True, _print=True)
-    #net = FCN(n_channels=3, n_classes=1)
-    # net = SegNet(n_channels=3, n_classes=1)
-    # net = UNet2(1,1)
-    # net = UNet3D(1,1)
-    # net = UNet3D_Aniso(1,1)
-    # net = UNet3DFrawley(1,1)
-    # net = MGUNet_2(in_channels=1, out_channels=1, feature_scale=4, is_deconv=True, is_batchnorm=True)
-    # net = UNet3D_Aniso2(1,1)
-    # net = UNet2D_attention(in_channels=1, out_channels=1)
-    # net = UNet2DEnc3DDec(in_channels=1, out_channels=1)
-    # net = CSAM_UNet2p5D(in_channels=1, out_channels=1, num_layers=3, base_num=32, semantic=True, positional=True, slice_att=True)
-    # net = UNet2p5D_SlidingWindow(k=7, out_channels=1, num_layers=3, base_num=32, pad_mode="replicate")
-    net = SwinUNETR3D(in_channels=1, n_classes=1, pretrained_path="./checkpoint/model_swinvit_UNETR.pt")
+        experiment_dir = os.path.join(model_root, f"fold_{fold_idx}")
+        os.makedirs(os.path.join(experiment_dir, "checkpoints"), exist_ok=True)
+        os.makedirs(os.path.join(experiment_dir, "logs"), exist_ok=True)
 
-    MODEL_NAME = f'{net.__class__.__name__}_{time.strftime("%b-%d-%Y_%H%M")}_model'
+        run_args = copy.deepcopy(args)
+        run_args.fold = fold_idx
+        run_args.model_name = model_name
+        run_args.experiment_dir = experiment_dir
 
-    experiment_dir = os.path.join(args.base_dir, 'elm-results/', MODEL_NAME)
-    if not os.path.exists(experiment_dir):
-        os.makedirs(experiment_dir)
-    if not os.path.exists(os.path.join(experiment_dir, 'checkpoints')):
-        os.makedirs(os.path.join(experiment_dir, 'checkpoints'))
-    logging.info(f'Experiment dir : {experiment_dir}')
+        logging.info(f"Experiment dir: {experiment_dir}")
 
-    # add model name to args
-    args.model_name = MODEL_NAME
-    args.experiment_dir = experiment_dir
+        if run_args.load:
+            net.load_state_dict(torch.load(run_args.load, map_location=device))
+            logging.info(f"Model loaded from {run_args.load}")
 
+        best_score, best_epoch = train_net(net=net, device=device, args=run_args)
+        return best_score, best_epoch, experiment_dir
 
-    if args.load:
-        net.load_state_dict(
-            torch.load(args.load, map_location=device)
-        )
-        logging.info(f'Model loaded from {args.load}')
-    net.to(device=device)
     try:
-        train_net(net=net,
-                  epochs=args.epochs,
-                  batch_size=args.batchsize,
-                  lr=args.lr,
-                  device=device,
-                  img_scale=args.scale,
-                  args=args)
+        if args.run_all_folds:
+            cv_results = []
+            for fold_idx in range(args.num_folds):
+                logging.info(f"===== Starting fold {fold_idx}/{args.num_folds - 1} =====")
+                best_score, best_epoch, exp_dir = run_single_fold(fold_idx)
+                cv_results.append(
+                    {
+                        "fold": fold_idx,
+                        "best_dice": best_score,
+                        "best_epoch": best_epoch,
+                        "experiment_dir": exp_dir,
+                    }
+                )
+
+            results_csv = os.path.join(model_root, "cv_results.csv")
+            with open(results_csv, "w", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=["fold", "best_dice", "best_epoch", "experiment_dir"],
+                )
+                writer.writeheader()
+                writer.writerows(cv_results)
+
+            scores = [row["best_dice"] for row in cv_results]
+            logging.info(f"CV results saved to {results_csv}")
+            logging.info(f"Mean Dice: {np.mean(scores):.6f}")
+            logging.info(f"Std Dice:  {np.std(scores):.6f}")
+        else:
+            best_score, best_epoch, exp_dir = run_single_fold(args.fold)
+            logging.info(
+                f"Fold {args.fold} best Dice: {best_score:.6f} at epoch {best_epoch} "
+                f"({exp_dir})"
+            )
+
     except KeyboardInterrupt:
-        torch.save(net.state_dict(), os.path.join(args.experiment_dir, 'checkpoints','INTERRUPTED_' + args.model_name + '.model'))
-        logging.info('Saved interrupt')
+        logging.info("Training interrupted")
         try:
             sys.exit(0)
         except SystemExit:
