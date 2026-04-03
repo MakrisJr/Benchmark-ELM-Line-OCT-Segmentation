@@ -352,31 +352,134 @@ The 3D dataset stacks the 49 slices of the OCT into a 3D volume with dimensions 
 Image format is EYE_ID-SLICE_ID.png, where SLICE_ID is from 0 to 48. Slices are greyscale (single channel).
 
 """
-class D3Dataset(Dataset): 
-    def __init__(self, imgs_dir, masks_dir, scale=1, transform=None):
-        self.imgs_dir = imgs_dir
-        self.masks_dir = masks_dir
+class D3Dataset(Dataset):
+    def __init__(
+        self,
+        imgs_dir=None,
+        masks_dir=None,
+        scale=1,
+        transform=None,
+        root_dir="data_no_anomalies",
+        split=None,
+        fold=None,
+        image_dir="all/image",
+        mask_dir="all/mask",
+        metadata_filename="metadata.csv",
+        image_ext=".png",
+        mask_ext=".png",
+        expected_slices=49,
+        out_size=(256, 256),
+    ):
         self.scale = scale
-        assert 0 < scale <= 1, 'Scale must be between 0 and 1'
-
-        # Get unique eye IDs by removing the slice part
-        all_files = [file for file in os.listdir(imgs_dir) if not file.startswith('.')]
-        self.eye_ids = sorted(set('-'.join(file.split('-')[:-1]) for file in all_files))
-
-        logging.info(f'Creating 3D dataset with {len(self.eye_ids)} examples')
         self.transform = transform
+        self.image_ext = image_ext
+        self.mask_ext = mask_ext
+        self.expected_slices = expected_slices
+        self.out_size = tuple(out_size)
+        assert 0 < scale <= 1, "Scale must be between 0 and 1"
 
-        # Define base augmentations
-        self.resize = A.Compose([
-            A.Resize(256, 256, interpolation=cv2.INTER_NEAREST)  # masks stay nearest
-        ])
+        self.resize = A.Compose(
+            [
+                A.Resize(
+                    self.out_size[0],
+                    self.out_size[1],
+                    interpolation=cv2.INTER_LINEAR,
+                    mask_interpolation=cv2.INTER_NEAREST,
+                )
+            ]
+        )
 
-        self.normalize = A.Compose([
-            A.Normalize(mean=[0.2147], std=[0.2256])
-        ])
+        if imgs_dir is not None and masks_dir is not None:
+            self.imgs_dir = Path(imgs_dir)
+            self.masks_dir = Path(masks_dir)
+            if not self.imgs_dir.exists():
+                raise FileNotFoundError(f"Image directory not found: {self.imgs_dir}")
+            if not self.masks_dir.exists():
+                raise FileNotFoundError(f"Mask directory not found: {self.masks_dir}")
 
+            all_files = [
+                file.name
+                for file in self.imgs_dir.iterdir()
+                if file.is_file() and not file.name.startswith(".")
+            ]
+            self.eye_ids = sorted(set("-".join(file.split("-")[:-1]) for file in all_files))
+            self.volumes = [
+                {
+                    "patient_id": eye_id,
+                    "fold": None,
+                    "image_dir": self.imgs_dir,
+                    "mask_dir": self.masks_dir,
+                }
+                for eye_id in self.eye_ids
+            ]
+        else:
+            self.root_dir = Path(root_dir)
+            self.image_dir = self.root_dir / image_dir
+            self.mask_dir = self.root_dir / mask_dir
+            self.metadata_path = self.root_dir / metadata_filename
 
-        self.to_tensor = ToTensorV2()
+            if not self.metadata_path.exists():
+                raise FileNotFoundError(f"Metadata file not found: {self.metadata_path}")
+            if not self.image_dir.exists():
+                raise FileNotFoundError(f"Image directory not found: {self.image_dir}")
+            if not self.mask_dir.exists():
+                raise FileNotFoundError(f"Mask directory not found: {self.mask_dir}")
+
+            df = pd.read_csv(self.metadata_path, dtype={"patient_id": str})
+            required_cols = {"patient_id", "fold"}
+            missing = required_cols - set(df.columns)
+            if missing:
+                raise ValueError(f"metadata.csv is missing required columns: {missing}")
+
+            df["patient_id"] = df["patient_id"].astype(str).str.strip().str.zfill(3)
+
+            if split is not None:
+                if split not in {"train", "val"}:
+                    raise ValueError("split must be one of: None, 'train', 'val'")
+                if fold is None:
+                    raise ValueError("fold must be provided when split is 'train' or 'val'")
+                if split == "train":
+                    df = df[df["fold"] != fold].copy()
+                else:
+                    df = df[df["fold"] == fold].copy()
+
+            self.volumes = []
+            for _, row in df.iterrows():
+                patient_id = row["patient_id"]
+                img_paths = sorted(self.image_dir.glob(f"{patient_id}-*{self.image_ext}"))
+                if not img_paths:
+                    logging.warning(
+                        f"Skipping {patient_id}: no images found matching "
+                        f"{patient_id}-*{self.image_ext} in {self.image_dir}"
+                    )
+                    continue
+
+                valid_pair_found = False
+                for img_path in img_paths:
+                    mask_path = self.mask_dir / img_path.name
+                    if mask_path.exists():
+                        valid_pair_found = True
+                        break
+
+                if not valid_pair_found:
+                    logging.warning(f"Skipping {patient_id}: no valid mask pairs found")
+                    continue
+
+                self.volumes.append(
+                    {
+                        "patient_id": patient_id,
+                        "fold": int(row["fold"]),
+                        "image_dir": self.image_dir,
+                        "mask_dir": self.mask_dir,
+                    }
+                )
+
+            self.eye_ids = [entry["patient_id"] for entry in self.volumes]
+
+        logging.info(
+            f"Creating 3D dataset with {len(self.eye_ids)} examples "
+            f"(split={split}, fold={fold})"
+        )
 
     def apply_volume_transform(self, img_volume, mask_volume):
         """
@@ -441,38 +544,61 @@ class D3Dataset(Dataset):
 
         return np.stack(transformed_slices), np.stack(transformed_masks)
 
+    def _load_slice(self, folder: Path, eye_id: str, slice_idx: int, fallback=None):
+        path = folder / f"{eye_id}-{slice_idx}{self.image_ext}"
+        if not path.exists():
+            if fallback is None:
+                raise FileNotFoundError(f"Missing slice: {path}")
+            return fallback.copy()
+        return np.array(Image.open(path).convert("L"))
+
     def __getitem__(self, i):
-        eye_id = self.eye_ids[i]
+        volume = self.volumes[i]
+        eye_id = volume["patient_id"]
         img_slices = []
         mask_slices = []
 
-        # load all 49 slices
-        for slice_idx in range(49):
-            img_file = f"{self.imgs_dir}/{eye_id}-{slice_idx}.png"
-            mask_file = f"{self.masks_dir}/{eye_id}-{slice_idx}.png"
-            try:
-                img = Image.open(img_file).convert('L')
-                mask = Image.open(mask_file).convert('L')
-            except FileNotFoundError:
-                # repeat last slice if current is missing
-                img = img_slices[-1]
-                mask = mask_slices[-1]
+        for slice_idx in range(self.expected_slices):
+            prev_img = img_slices[-1] if img_slices else None
+            prev_mask = mask_slices[-1] if mask_slices else None
+            img = self._load_slice(volume["image_dir"], eye_id, slice_idx, fallback=prev_img)
+            mask_path = volume["mask_dir"] / f"{eye_id}-{slice_idx}{self.mask_ext}"
+            if mask_path.exists():
+                mask = np.array(Image.open(mask_path).convert("L"))
+            elif prev_mask is not None:
+                mask = prev_mask.copy()
+            else:
+                raise FileNotFoundError(f"Missing mask slice: {mask_path}")
 
-            img_slices.append(np.array(img))
-            mask_slices.append(np.array(mask))
+            img_slices.append(img)
+            mask_slices.append(mask)
 
-        # Form 3D volume D x H x W
         img_volume = np.stack(img_slices)
         mask_volume = np.stack(mask_slices)
 
-        # Apply transforms
         if self.transform == True:
             img_volume, mask_volume = self.apply_volume_transform(img_volume, mask_volume)
 
-        # Resize
+        if self.scale != 1.0:
+            scaled_imgs = []
+            scaled_masks = []
+            for img_slice, mask_slice in zip(img_volume, mask_volume):
+                h, w = img_slice.shape[:2]
+                new_w = int(self.scale * w)
+                new_h = int(self.scale * h)
+                if new_w <= 0 or new_h <= 0:
+                    raise ValueError("Scale is too small")
+                scaled_imgs.append(
+                    cv2.resize(img_slice, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                )
+                scaled_masks.append(
+                    cv2.resize(mask_slice, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+                )
+            img_volume = np.stack(scaled_imgs)
+            mask_volume = np.stack(scaled_masks)
+
         resized_imgs = []
         resized_masks = []
-
         for img_slice, mask_slice in zip(img_volume, mask_volume):
             out = self.resize(image=img_slice, mask=mask_slice)
             resized_imgs.append(out["image"])
@@ -481,23 +607,15 @@ class D3Dataset(Dataset):
         img_volume = np.stack(resized_imgs)
         mask_volume = np.stack(resized_masks)
 
-
-
-        # apply median filter:
-        # img_volume = np.stack([
-        #     cv2.medianBlur(slice, ksize=3) for slice in img_volume
-        # ])
-
-        # Normalize (images only)
-        # img_volume = np.stack(norm_imgs)
         img_volume = img_volume.astype(np.float32) / 255.0
         img_volume = (img_volume - 0.2147) / 0.2256
+        mask_volume = (mask_volume > 0).astype(np.float32)
 
-
-        # Convert to torch tensor with channel dimension
         return {
-            'image': torch.tensor(img_volume, dtype=torch.float32).unsqueeze(0), # dims are [1 x 49 x 256 x 256]
-            'mask': torch.tensor(mask_volume / 255.0, dtype=torch.float32).unsqueeze(0) # also convert to binary
+            "patient_id": eye_id,
+            "fold": volume["fold"],
+            "image": torch.tensor(img_volume, dtype=torch.float32).unsqueeze(0),
+            "mask": torch.tensor(mask_volume, dtype=torch.float32).unsqueeze(0),
         }
 
     def __len__(self):
