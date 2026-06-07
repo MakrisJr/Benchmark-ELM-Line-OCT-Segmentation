@@ -8,8 +8,8 @@ from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, average_precision_score
 import math
 
-from dataset import D3Dataset
-from model import UNet2DEnc3DDec, UNet3DFrawley, UNet3D, UNet3D_Aniso  # keep if you want selector
+from elm.dataset import D3Dataset
+from elm.model import UNet2DEnc3DDec, UNet3DFrawley, UNet3D, UNet3D_Aniso  # keep if you want selector
 
 
 # -----------------------------

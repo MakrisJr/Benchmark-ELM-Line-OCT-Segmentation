@@ -160,8 +160,8 @@ class BasicDataset(Dataset):
     def __init__(
         self,
         root_dir="data_no_anomalies",
-        split=None,            # None, "train", or "val"
-        fold=None,             # integer fold index, required if split is train/val
+        split=None,            # None, "train", "val", or "test"
+        fold=None,             # integer fold index, required when split is provided
         scale=1.0,
         transform=None,
         single_channel=False,
@@ -181,6 +181,7 @@ class BasicDataset(Dataset):
         self.single_channel = single_channel
         self.image_ext = image_ext
         self.mask_ext = mask_ext
+        self.fold = fold
 
         assert 0 < scale <= 1, "Scale must be between 0 and 1"
 
@@ -194,7 +195,7 @@ class BasicDataset(Dataset):
         # Read metadata
         df = pd.read_csv(self.metadata_path, dtype={"patient_id": str})
 
-        required_cols = {"patient_id", "fold"}
+        required_cols = {"patient_id"}
         missing = required_cols - set(df.columns)
         if missing:
             raise ValueError(f"metadata.csv is missing required columns: {missing}")
@@ -204,15 +205,25 @@ class BasicDataset(Dataset):
 
         # Apply split filtering
         if split is not None:
-            if split not in {"train", "val"}:
-                raise ValueError("split must be one of: None, 'train', 'val'")
+            if split not in {"train", "val", "test"}:
+                raise ValueError("split must be one of: None, 'train', 'val', 'test'")
             if fold is None:
-                raise ValueError("fold must be provided when split is 'train' or 'val'")
+                raise ValueError("fold must be provided when split is set")
 
-            if split == "train":
-                df = df[df["fold"] != fold].copy()
-            elif split == "val":
-                df = df[df["fold"] == fold].copy()
+            split_col = f"split_fold{fold}"
+            if split_col in df.columns:
+                df = df[df[split_col] == split].copy()
+            else:
+                if split == "test":
+                    raise ValueError(
+                        f"metadata.csv has no '{split_col}' column; cannot build test split"
+                    )
+                if "fold" not in df.columns:
+                    raise ValueError("metadata.csv is missing required columns: {'fold'}")
+                if split == "train":
+                    df = df[df["fold"] != fold].copy()
+                elif split == "val":
+                    df = df[df["fold"] == fold].copy()
 
         # Keep only patients that have both image and mask files
         valid_rows = []
@@ -238,7 +249,7 @@ class BasicDataset(Dataset):
                 valid_rows.append(
                     {
                         "patient_id": pid,
-                        "fold": int(row["fold"]),
+                        "fold": int(row["fold"]) if "fold" in row else None,
                         "image_path": img_path,
                         "mask_path": mask_path,
                     }
@@ -340,7 +351,7 @@ class BasicDataset(Dataset):
 
         return {
             "patient_id": patient_id,
-            "fold": int(row["fold"]),
+            "fold": self.fold,
             "image_name": image_name,
             "slice_idx": slice_idx,
             "image": img,
@@ -376,6 +387,7 @@ class D3Dataset(Dataset):
         self.mask_ext = mask_ext
         self.expected_slices = expected_slices
         self.out_size = tuple(out_size)
+        self.fold = fold
         assert 0 < scale <= 1, "Scale must be between 0 and 1"
 
         self.resize = A.Compose(
@@ -426,7 +438,7 @@ class D3Dataset(Dataset):
                 raise FileNotFoundError(f"Mask directory not found: {self.mask_dir}")
 
             df = pd.read_csv(self.metadata_path, dtype={"patient_id": str})
-            required_cols = {"patient_id", "fold"}
+            required_cols = {"patient_id"}
             missing = required_cols - set(df.columns)
             if missing:
                 raise ValueError(f"metadata.csv is missing required columns: {missing}")
@@ -434,14 +446,25 @@ class D3Dataset(Dataset):
             df["patient_id"] = df["patient_id"].astype(str).str.strip().str.zfill(3)
 
             if split is not None:
-                if split not in {"train", "val"}:
-                    raise ValueError("split must be one of: None, 'train', 'val'")
+                if split not in {"train", "val", "test"}:
+                    raise ValueError("split must be one of: None, 'train', 'val', 'test'")
                 if fold is None:
-                    raise ValueError("fold must be provided when split is 'train' or 'val'")
-                if split == "train":
-                    df = df[df["fold"] != fold].copy()
+                    raise ValueError("fold must be provided when split is set")
+
+                split_col = f"split_fold{fold}"
+                if split_col in df.columns:
+                    df = df[df[split_col] == split].copy()
                 else:
-                    df = df[df["fold"] == fold].copy()
+                    if split == "test":
+                        raise ValueError(
+                            f"metadata.csv has no '{split_col}' column; cannot build test split"
+                        )
+                    if "fold" not in df.columns:
+                        raise ValueError("metadata.csv is missing required columns: {'fold'}")
+                    if split == "train":
+                        df = df[df["fold"] != fold].copy()
+                    else:
+                        df = df[df["fold"] == fold].copy()
 
             self.volumes = []
             for _, row in df.iterrows():
@@ -468,7 +491,7 @@ class D3Dataset(Dataset):
                 self.volumes.append(
                     {
                         "patient_id": patient_id,
-                        "fold": int(row["fold"]),
+                        "fold": int(row["fold"]) if "fold" in row else None,
                         "image_dir": self.image_dir,
                         "mask_dir": self.mask_dir,
                     }
@@ -608,12 +631,12 @@ class D3Dataset(Dataset):
         mask_volume = np.stack(resized_masks)
 
         img_volume = img_volume.astype(np.float32) / 255.0
-        img_volume = (img_volume - 0.2147) / 0.2256
+        img_volume = (img_volume - 0.2147) / 0.2256 
         mask_volume = (mask_volume > 0).astype(np.float32)
 
         return {
             "patient_id": eye_id,
-            "fold": volume["fold"],
+            "fold": self.fold,
             "image": torch.tensor(img_volume, dtype=torch.float32).unsqueeze(0),
             "mask": torch.tensor(mask_volume, dtype=torch.float32).unsqueeze(0),
         }

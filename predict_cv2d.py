@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from elm.dataset import BasicDataset, make_2d_transforms
 from elm.model import (
@@ -240,7 +241,7 @@ def main():
     all_patient_rows = []
     all_slice_rows = []
 
-    for fold in range(args.num_folds):
+    for fold in tqdm(range(args.num_folds), desc="Folds"):
         ckpt = find_fold_checkpoint(model_root, fold)
         if ckpt is None:
             raise FileNotFoundError(
@@ -258,7 +259,7 @@ def main():
         transform_val = make_2d_transforms(train=False, out_size=(256, 256))
         ds = BasicDataset(
             root_dir=data_root,
-            split="val",
+            split="test",
             fold=fold,
             scale=1.0,
             transform=transform_val,
@@ -294,7 +295,7 @@ def main():
         )
 
         with torch.no_grad():
-            for batch in loader:
+            for batch in tqdm(loader, desc=f"  Fold {fold} batches", leave=False):
                 imgs = batch["image"].to(device=device, dtype=torch.float32)
                 gts = batch["mask"].to(device=device, dtype=torch.float32)
 
@@ -443,7 +444,7 @@ def main():
         print(f"{metric:14s}: {mu:.6f} ± {sd:.6f}")
 
     # OOF mean ± std across eyes (patients)
-    # Each eye is evaluated exactly once (on its own validation fold), so this is a
+    # Each eye is evaluated exactly once (on its own test fold), so this is a
     # standard deviation across eyes, not across folds.
     print("\n=== OOF (per-eye) mean±std across eyes ===")
     eye_summary_rows = []
@@ -483,7 +484,14 @@ if __name__ == "__main__":
 """
 SegNet:
 python predict_cv2d.py --model_root elm-results/SegNet_Apr-01-2026_1639_model --model SegNet
+python predict_cv2d.py --model_root elm-results/SegNet_Jun-04-2026_1243_model --model SegNet
+
+R2U_Net:
+python predict_cv2d.py --model_root elm-results/R2U_Net_Apr-02-2026_0637_model --model R2U_Net
+python predict_cv2d.py --model_root elm-results/R2U_Net_Jun-04-2026_0441_model --model R2U_Net
 
 SwinEncoderUNet2D:
 python predict_cv2d.py --model_root elm-results/SwinEncoderUNet2D_Apr-01-2026_1633_model --model SwinEncoderUNet2D
+python predict_cv2d.py --model_root elm-results/SwinEncoderUNet2D_Jun-03-2026_1639_model --model SwinEncoderUNet2D
+
 """

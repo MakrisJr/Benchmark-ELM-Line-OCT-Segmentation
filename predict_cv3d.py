@@ -288,7 +288,7 @@ def main():
 
         ds = D3Dataset(
             root_dir=str(data_root),
-            split="val",
+            split="test",
             fold=fold,
             scale=args.scale,
             transform=False,
