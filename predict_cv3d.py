@@ -7,10 +7,11 @@ import numpy as np
 import torch
 from scipy import ndimage as ndi
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from elm.dataset import D3Dataset
 from elm.model import (
-    CSAM_UNet2p5D,
+    # CSAM_UNet2p5D,
     SwinUNETR3D,
     UNet2DEnc3DDec,
     UNet2p5D_SlidingWindow,
@@ -18,7 +19,9 @@ from elm.model import (
     UNet3D_Aniso,
     UNet3D_Aniso2,
     UNet3DFrawley,
+    PadCropWrapper,
 )
+from elm.csam import CSAM_UNet2p5D
 
 
 def safe_div(n, d, eps=1e-12):
@@ -157,13 +160,13 @@ def match_depth(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
 
 def build_model(model_name: str, pretrained_path: str = None, window_k: int = 7):
     if model_name == "UNet3D":
-        return UNet3D(in_channels=1, out_channels=1)
+        return PadCropWrapper(UNet3D(in_channels=1, out_channels=1))
     if model_name == "UNet3D_Aniso":
-        return UNet3D_Aniso(in_channels=1, out_channels=1)
+        return PadCropWrapper(UNet3D_Aniso(in_channels=1, out_channels=1))
     if model_name == "UNet3D_Aniso2":
-        return UNet3D_Aniso2(in_channels=1, out_channels=1)
+        return PadCropWrapper(UNet3D_Aniso2(in_channels=1, out_channels=1))
     if model_name == "UNet3DFrawley":
-        return UNet3DFrawley(in_channels=1, out_channels=1)
+        return PadCropWrapper(UNet3DFrawley(in_channels=1, out_channels=1))
     if model_name == "UNet2DEnc3DDec":
         return UNet2DEnc3DDec(in_channels=1, out_channels=1)
     if model_name == "CSAM_UNet2p5D":
@@ -268,7 +271,7 @@ def main():
 
     data_root = Path(args.base_dir) / "data_no_anomalies"
 
-    for fold in range(args.num_folds):
+    for fold in tqdm(range(args.num_folds), desc="Folds"):
         ckpt = find_fold_checkpoint(model_root, fold)
         if ckpt is None:
             raise FileNotFoundError(
@@ -305,7 +308,7 @@ def main():
         volume_rows = []
 
         with torch.no_grad():
-            for batch in loader:
+            for batch in tqdm(loader, desc=f"Fold {fold}", leave=False):
                 imgs = batch["image"].to(device=device, dtype=torch.float32)
                 gts = batch["mask"].to(device=device, dtype=torch.float32)
 
@@ -496,5 +499,39 @@ python predict_cv3d.py \
 python predict_cv3d.py \
   --model_root elm-results/UNet2DEnc3DDec_Apr-02-2026_2021_model \
   --model UNet2DEnc3DDec
+
+New train val test split: 
+python predict_cv3d.py \
+    --model_root elm-results/SwinUNETR3D_Jun-07-2026_1601_model \
+    --model SwinUNETR3D
+
+python predict_cv3d.py \
+    --model_root elm-results/UNet2DEnc3DDec_Jun-07-2026_1946_model \
+    --model UNet2DEnc3DDec
+
+python predict_cv3d.py \
+    --model_root elm-results/UNet3DFrawley_Jun-07-2026_2241_model \
+    --model UNet3DFrawley
+
+python predict_cv3d.py \
+    --model_root elm-results/CSAM_UNet2p5D_Jun-08-2026_0152_model \
+    --model CSAM_UNet2p5D
+
+python predict_cv3d.py \
+    --model_root elm-results/UNet3D_Jun-09-2026_0954_model \
+    --model UNet3D
+
+python predict_cv3d.py \
+    --model_root elm-results/UNet3D_Aniso_Jun-09-2026_1228_model \
+    --model UNet3D_Aniso
+
+python predict_cv3d.py \
+    --model_root elm-results/UNet3DFrawley_Jun-09-2026_1509_model \
+    --model UNet3DFrawley
+
+
+
+    
+
 
 """
