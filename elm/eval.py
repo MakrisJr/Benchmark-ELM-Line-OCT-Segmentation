@@ -10,7 +10,7 @@ from .dice_loss import dice_coeff, dice_loss, dice_per_slice_mean
 def eval_net(net, loader, device):
     """Evaluation without the densecrf with the dice coefficient"""
     net.eval()
-    mask_type = torch.float32 if net.n_classes == 1 else torch.long
+    mask_type = torch.float32
     n_val = len(loader) * loader.batch_size
     total_imgs = 0
     tot = 0
@@ -25,14 +25,10 @@ def eval_net(net, loader, device):
             with torch.no_grad():
                 mask_pred = net(imgs)
 
-            if net.n_classes > 1:
-                tot += F.cross_entropy(mask_pred, true_masks).item() * imgs.size(0)
-                total_imgs += imgs.size(0)
-            else:
-                pred = torch.sigmoid(mask_pred)
-                pred = (pred > 0.5).float()
-                total_imgs += imgs.size(0)
-                tot += dice_coeff(pred, true_masks).item() * imgs.size(0) # sum over batch
+            pred = torch.sigmoid(mask_pred)
+            pred = (pred > 0.5).float()
+            total_imgs += imgs.size(0)
+            tot += dice_coeff(pred, true_masks).item() * imgs.size(0) # sum over batch
             pbar.update()
 
     net.train()
