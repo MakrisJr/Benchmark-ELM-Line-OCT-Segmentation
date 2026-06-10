@@ -27,7 +27,6 @@ from elm.dataset import D3Dataset
 from elm.dice_loss import dice_loss
 from elm.eval import eval_net
 from elm.model import (
-    CSAM_UNet2p5D,
     SwinUNETR3D,
     UNet2DEnc3DDec,
     UNet2p5D_SlidingWindow,
@@ -35,7 +34,9 @@ from elm.model import (
     UNet3D_Aniso,
     UNet3D_Aniso2,
     UNet3DFrawley,
+    PadCropWrapper,
 )
+from elm.csam import CSAM_UNet2p5D
 
 
 def mb(x):
@@ -61,13 +62,13 @@ def print_gpu_mem(device=None, prefix=""):
 
 def build_model(args):
     if args.model == "UNet3D":
-        return UNet3D(in_channels=1, out_channels=1)
+        return PadCropWrapper(UNet3D(in_channels=1, out_channels=1))
     if args.model == "UNet3D_Aniso":
-        return UNet3D_Aniso(in_channels=1, out_channels=1)
+        return PadCropWrapper(UNet3D_Aniso(in_channels=1, out_channels=1))
     if args.model == "UNet3D_Aniso2":
-        return UNet3D_Aniso2(in_channels=1, out_channels=1)
+        return PadCropWrapper(UNet3D_Aniso2(in_channels=1, out_channels=1))
     if args.model == "UNet3DFrawley":
-        return UNet3DFrawley(in_channels=1, out_channels=1)
+        return PadCropWrapper(UNet3DFrawley(in_channels=1, out_channels=1))
     if args.model == "UNet2DEnc3DDec":
         return UNet2DEnc3DDec(in_channels=1, out_channels=1)
     if args.model == "CSAM_UNet2p5D":
@@ -80,6 +81,16 @@ def build_model(args):
             positional=True,
             slice_att=True,
         )
+    # if args.model == "CSAM_UNet2p5D_2":
+        # return CSAM_UNet2p5D_2(
+        #     in_channels=1,
+        #     out_channels=1,
+        #     num_layers=3,
+        #     base_num=32,
+        #     semantic=True,
+        #     positional=True,
+        #     slice_att=True,
+        # )
     if args.model == "UNet2p5D_SlidingWindow":
         return UNet2p5D_SlidingWindow(
             k=args.window_k,
@@ -319,6 +330,7 @@ def get_args():
             "CSAM_UNet2p5D",
             "UNet2p5D_SlidingWindow",
             "SwinUNETR3D",
+            # "CSAM_UNet2p5D_2",
         ],
         help="3D model architecture to train",
     )

@@ -1884,148 +1884,320 @@ class UNet2(nn.Module):
 """
 the 3D Unet takes a 3D volume B x C x D x H x W and outputs a segmentation map of B x n_classes x D x H x W
 """
-class UNet3D(nn.Module):
-    def __init__(self, in_channels=1, out_channels=1):
-        super(UNet3D, self).__init__()
-        self.n_classes = out_channels
 
-        def conv_block(in_c, out_c):
-            return nn.Sequential(
-                nn.Conv3d(in_c, out_c, kernel_size=3, padding=1),
-                nn.ReLU(inplace=True),
-                nn.Conv3d(out_c, out_c, kernel_size=3, padding=1),
-                nn.ReLU(inplace=True)
-            )
-        
-        # Upsampling with optional output_padding
-        def upsample(in_c, out_c, output_padding=(0,0,0)):
-            return nn.ConvTranspose3d(
-                in_c, out_c, kernel_size=2, stride=2, output_padding=output_padding
-            )
+# ---------------------------------------------------------------------------
+# Depth pad/crop: make volume depth a clean power of two so 3D pooling never
+# rounds. Applied identically to every model as a pipeline wrapper, so it adds
+# no architecture-specific behaviour to the comparison.
+# ---------------------------------------------------------------------------
+def pad_depth(x, target=64, mode="reflect"):
+    """Pad B x C x D x H x W along depth up to `target`.
+    Returns (padded_tensor, (front, back)) for exact cropping later."""
+    d = x.shape[2]
+    if d > target:
+        raise ValueError(f"input depth {d} exceeds target {target}")
+    total = target - d
+    front = total // 2
+    back = total - front
+    if total == 0:
+        return x, (0, 0)
+    pad_mode = "reflect" if mode == "reflect" else "constant"
+    x = F.pad(x, (0, 0, 0, 0, front, back), mode=pad_mode)
+    return x, (front, back)
 
-        # Encoder
-        self.enc1 = conv_block(in_channels, 64)
-        self.enc2 = conv_block(64, 128)
-        self.enc3 = conv_block(128, 256)
-        self.enc4 = conv_block(256, 512)
-        self.pool = nn.MaxPool3d(kernel_size=2, stride=2)
 
-        # Bottleneck
-        self.bottleneck = conv_block(512, 1024)
+def crop_depth(x, pad):
+    """Invert pad_depth: remove (front, back) slices along depth."""
+    front, back = pad
+    if front == 0 and back == 0:
+        return x
+    d = x.shape[2]
+    return x[:, :, front:d - back, :, :]
 
-        # Decoder
-        # output_padding = (D_pad, H_pad, W_pad)
-        self.up4 = upsample(1024, 512)  # fixes depth 3→6
-        self.dec4 = conv_block(1024, 512)
-        self.up3 = upsample(512, 256)  # no padding needed
-        self.dec3 = conv_block(512, 256)
-        self.up2 = upsample(256, 128)  # no padding needed
-        self.dec2 = conv_block(256, 128)
-        self.up1 = upsample(128, 64, output_padding=(1,0,0))  # fixes final depth 48 -> 49
-        self.dec1 = conv_block(128, 64)
-
-        # Final output layer
-        self.final = nn.Conv3d(64, out_channels, kernel_size=1)
+class PadCropWrapper(nn.Module):
+    """Wraps any 3D net so the loop can pass raw 49-slice volumes and get
+    49-slice logits back. Pad -> forward -> crop, all internal."""
+    def __init__(self, net, target=64, mode="reflect"):
+        super().__init__()
+        self.net = net
+        self.target = target
+        self.mode = mode
 
     def forward(self, x):
-        # Encoder
-        e1 = self.enc1(x) # B x 64 x 49 x 256 x 256
-        e2 = self.enc2(self.pool(e1)) # B x 128 x 24 x 128 x 128
-        e3 = self.enc3(self.pool(e2)) # B x 256 x 12 x 64 x 64
-        e4 = self.enc4(self.pool(e3)) # B x 512 x 6 x 32 x 32
-        b = self.bottleneck(self.pool(e4)) # B x 1024 x 3 x 16 x 16
+        x, pad = pad_depth(x, target=self.target, mode=self.mode)
+        x = self.net(x)
+        return crop_depth(x, pad)
 
-        # Decoder
-        d4 = self.dec4(torch.cat((self.up4(b), e4), dim=1))
-        d3 = self.dec3(torch.cat((self.up3(d4), e3), dim=1))
-        d2 = self.dec2(torch.cat((self.up2(d3), e2), dim=1))
-        d1 = self.dec1(torch.cat((self.up1(d2), e1), dim=1))
 
-        return self.final(d1)
-    
+# ---------------------------------------------------------------------------
+def _conv_block(in_c, out_c, depth_dilation=1):
+    """Two 3x3x3 convs, each BN + ReLU. Faithful to Cicek et al. 2016.
+    `depth_dilation` spreads the kernel along depth only (H,W stay dilation-1);
+    padding matches dilation so output size is unchanged. depth_dilation=1 is
+    the standard isotropic block."""
+    d = depth_dilation
+    return nn.Sequential(
+        nn.Conv3d(in_c, out_c, kernel_size=3, padding=(d, 1, 1), dilation=(d, 1, 1)),
+        nn.BatchNorm3d(out_c),
+        nn.ReLU(inplace=True),
+        nn.Conv3d(out_c, out_c, kernel_size=3, padding=(d, 1, 1), dilation=(d, 1, 1)),
+        nn.BatchNorm3d(out_c),
+        nn.ReLU(inplace=True),
+    )
+
+
+class UNet3D(nn.Module):
+    """
+    Faithful 3D U-Net (Cicek et al., 2016): isotropic MaxPool3d(2),
+    ConvTranspose3d(2, stride 2) upsampling, concatenative skips, doubling
+    channels, two BN-ReLU convs per block, all dilation-1. base=16 to match
+    UNet3DFrawley's capacity regime.
+
+    Depth is padded to 64 upstream, so the depth path is clean:
+    64 -> 32 -> 16 -> 8 -> 16 -> 32 -> 64, NO output_padding needed.
+    The isotropic model grows its depth receptive field BY downsampling depth.
+    """
+    def __init__(self, in_channels=1, out_channels=1, base=32):
+        super().__init__()
+        self.n_classes = out_channels
+        b = base
+
+        self.enc1 = _conv_block(in_channels, b)        # b x 64 x 256 x 256
+        self.enc2 = _conv_block(b, 2 * b)              # 2b x 32 x 128 x 128
+        self.enc3 = _conv_block(2 * b, 4 * b)          # 4b x 16 x 64 x 64
+        self.pool = nn.MaxPool3d(kernel_size=2, stride=2) # halves depth too, so 4b x 8 x 32 x 32 at bottleneck
+
+        self.bottleneck = _conv_block(4 * b, 8 * b)    # 8b x 8 x 32 x 32
+
+        self.up3 = nn.ConvTranspose3d(8 * b, 4 * b, kernel_size=2, stride=2)  # 8->16
+        self.dec3 = _conv_block(8 * b, 4 * b)
+
+        self.up2 = nn.ConvTranspose3d(4 * b, 2 * b, kernel_size=2, stride=2)  # 16->32
+        self.dec2 = _conv_block(4 * b, 2 * b)
+
+        self.up1 = nn.ConvTranspose3d(2 * b, b, kernel_size=2, stride=2)      # 32->64
+        self.dec1 = _conv_block(2 * b, b)
+
+        self.final = nn.Conv3d(b, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        e1 = self.enc1(x)                      # b  x 64 x 256 x 256
+        e2 = self.enc2(self.pool(e1))          # 2b x 32 x 128 x 128
+        e3 = self.enc3(self.pool(e2))          # 4b x 16 x  64 x  64
+        bott = self.bottleneck(self.pool(e3))  # 8b x  8 x  32 x  32
+
+        d3 = self.dec3(torch.cat((self.up3(bott), e3), dim=1)) # 4b x 16 x 64 x 64
+        d2 = self.dec2(torch.cat((self.up2(d3), e2), dim=1))   # 2b x 32 x 128 x 128
+        d1 = self.dec1(torch.cat((self.up1(d2), e1), dim=1))   # b x 64 x 256 x 256
+        return self.final(d1) # b x out_channels x 64 x 256 x 256
+
 
 class UNet3D_Aniso(nn.Module):
     """
-    UNet3D with anisotropic pooling to preserve more depth resolution.
-    Pooling strides: (2,2,2), (2,2,2), (1,2,2), (1,2,2)
-    Corresponding upsampling uses the same strides reversed.
+    Anisotropic 3D U-Net, single-late-depth-pool variant.
+
+    Depth resolution is preserved through the high-res levels and downsampled
+    only at the deepest pooling step, so depth context is gained by AVERAGING
+    adjacent slices (MaxPool over a (2,2,2) window) rather than by skipping
+    slices (dilation). All convs are plain dilation-1 -> dense depth coverage
+    at every level where depth is processed.
+
+    Matched to UNet3D in capacity (base), blocks, BN, ConvTranspose upsampling
+    and concatenative skips. Differs only in WHERE depth is downsampled:
+        UNet3D (isotropic):  every pool halves depth   -> 64,32,16,8
+        this model:          only the deepest pool      -> 64,64,64,32
+
+    Per-level pool strides (depth, H, W):
+        pool0 = (1,2,2)   depth preserved
+        pool1 = (1,2,2)   depth preserved
+        pool2 = (2,2,2)   depth halved  <-- the single late depth pool
+    Decoder up-steps mirror each pool's stride exactly.
     """
-    def __init__(self, in_channels=1, out_channels=1, base_filters=64):
+    def __init__(self, in_channels=1, out_channels=1, base=32):
         super().__init__()
         self.n_classes = out_channels
+        b = base
 
-        def conv_block(in_c, out_c):
-            return nn.Sequential(
-                nn.Conv3d(in_c, out_c, kernel_size=3, padding=1),
-                nn.BatchNorm3d(out_c),
-                nn.ReLU(inplace=True),
-                nn.Conv3d(out_c, out_c, kernel_size=3, padding=1),
-                nn.BatchNorm3d(out_c),
-                nn.ReLU(inplace=True),
-                nn.Conv3d(out_c, out_c, kernel_size=3, padding=1),
-                nn.BatchNorm3d(out_c),
-                nn.ReLU(inplace=True)
-            )
+        # strides per level (depth, H, W); last entry is the late depth pool
+        s0, s1, s2 = (1, 2, 2), (1, 2, 2), (2, 2, 2)
+        self._s0, self._s1, self._s2 = s0, s1, s2
 
-        # anisotropic pooling kernels/strides
-        self.pool1 = nn.MaxPool3d(kernel_size=(2,2,2), stride=(2,2,2))
-        self.pool2 = nn.MaxPool3d(kernel_size=(2,2,2), stride=(2,2,2))
-        self.pool3 = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
-        self.pool4 = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
+        self.enc1 = _conv_block(in_channels, b)        # 64 x 256 x 256
+        self.pool0 = nn.MaxPool3d(kernel_size=s0, stride=s0)
 
-        # Encoder
-        f = base_filters
-        self.enc1 = conv_block(in_channels, f)
-        self.enc2 = conv_block(f, f*2)
-        self.enc3 = conv_block(f*2, f*4)
-        self.enc4 = conv_block(f*4, f*8)
+        self.enc2 = _conv_block(b, 2 * b)              # 64 x 128 x 128
+        self.pool1 = nn.MaxPool3d(kernel_size=s1, stride=s1)
 
-        # Bottleneck
-        self.bottleneck = conv_block(f*8, f*16)
+        self.enc3 = _conv_block(2 * b, 4 * b)          # 64 x  64 x  64
+        self.pool2 = nn.MaxPool3d(kernel_size=s2, stride=s2)   # <-- depth halves here
 
-        # Decoder - use ConvTranspose3d with matching strides
-        self.up4 = nn.ConvTranspose3d(f*16, f*8, kernel_size=(1,2,2), stride=(1,2,2))
-        self.dec4 = conv_block(f*16, f*8)
+        self.bottleneck = _conv_block(4 * b, 8 * b)    # 32 x  32 x  32
 
-        self.up3 = nn.ConvTranspose3d(f*8, f*4, kernel_size=(1,2,2), stride=(1,2,2))
-        self.dec3 = conv_block(f*8, f*4)
+        # decoder up-steps invert the matching pool stride
+        self.up3 = nn.ConvTranspose3d(8 * b, 4 * b, kernel_size=s2, stride=s2)  # 32->64 depth
+        self.dec3 = _conv_block(8 * b, 4 * b)
 
-        self.up2 = nn.ConvTranspose3d(f*4, f*2, kernel_size=(2,2,2), stride=(2,2,2))
-        self.dec2 = conv_block(f*4, f*2)
+        self.up2 = nn.ConvTranspose3d(4 * b, 2 * b, kernel_size=s1, stride=s1)  # depth preserved
+        self.dec2 = _conv_block(4 * b, 2 * b)
 
-        self.up1 = nn.ConvTranspose3d(f*2, f, kernel_size=(2,2,2), stride=(2,2,2), output_padding=(1,0,0))
-        self.dec1 = conv_block(f*2, f)
+        self.up1 = nn.ConvTranspose3d(2 * b, b, kernel_size=s0, stride=s0)      # depth preserved
+        self.dec1 = _conv_block(2 * b, b)
 
-        self.final = nn.Conv3d(f, out_channels, kernel_size=1)
+        self.final = nn.Conv3d(b, out_channels, kernel_size=1)
 
     def forward(self, x):
-        # Encoder
-        e1 = self.enc1(x)                # B x f x 49 x 256 x 256
-        p1 = self.pool1(e1)             # 24 x 128 x 128
-        e2 = self.enc2(p1)              # B x 2f x 24 x 128 x 128
-        p2 = self.pool2(e2)             # 12 x 64 x 64
-        e3 = self.enc3(p2)              # B x 4f x 12 x 64 x 64
-        p3 = self.pool3(e3)             # 12 x 32 x 32 (depth preserved)
-        e4 = self.enc4(p3)              # B x 8f x 12 x 32 x 32
-        p4 = self.pool4(e4)             # 12 x 16 x 16 (depth preserved)
-        b = self.bottleneck(p4)         # B x 16f x 12 x 16 x 16
+        e1 = self.enc1(x)                      # b  x 64 x 256 x 256
+        e2 = self.enc2(self.pool0(e1))         # 2b x 64 x 128 x 128
+        e3 = self.enc3(self.pool1(e2))         # 4b x 64 x  64 x  64
+        bott = self.bottleneck(self.pool2(e3)) # 8b x 32 x  32 x  32
 
-        # Decoder (reverse order of pooling)
-        u4 = self.up4(b)                # B x 8f x 12 x 32 x 32
-        d4 = self.dec4(torch.cat((u4, e4), dim=1))
-
-        u3 = self.up3(d4)               # B x 4f x 12 x 64 x 64
-        d3 = self.dec3(torch.cat((u3, e3), dim=1))
-
-        u2 = self.up2(d3)               # B x 2f x 24 x 128 x 128
-        d2 = self.dec2(torch.cat((u2, e2), dim=1))
-
-        u1 = self.up1(d2)               # B x f x 49 x 256 x 256 (may need output_padding)
-        # if up1 produces 48 in depth, you may need output_padding=(1,0,0) depending on input dims
-        # concatenate with e1
-        d1 = self.dec1(torch.cat((u1, e1), dim=1))
-
+        d3 = self.dec3(torch.cat((self.up3(bott), e3), dim=1)) # 4b x 64 x 64 x 64
+        d2 = self.dec2(torch.cat((self.up2(d3), e2), dim=1))   # 2b x 64 x 128 x 128
+        d1 = self.dec1(torch.cat((self.up1(d2), e1), dim=1))   # b x 64 x 256 x 256
         return self.final(d1)
+
+# class UNet3D(nn.Module):
+#     def __init__(self, in_channels=1, out_channels=1):
+#         super(UNet3D, self).__init__()
+#         self.n_classes = out_channels
+
+#         def conv_block(in_c, out_c):
+#             return nn.Sequential(
+#                 nn.Conv3d(in_c, out_c, kernel_size=3, padding=1),
+#                 nn.ReLU(inplace=True),
+#                 nn.Conv3d(out_c, out_c, kernel_size=3, padding=1),
+#                 nn.ReLU(inplace=True)
+#             )
+        
+#         # Upsampling with optional output_padding
+#         def upsample(in_c, out_c, output_padding=(0,0,0)):
+#             return nn.ConvTranspose3d(
+#                 in_c, out_c, kernel_size=2, stride=2, output_padding=output_padding
+#             )
+
+#         # Encoder
+#         self.enc1 = conv_block(in_channels, 64)
+#         self.enc2 = conv_block(64, 128)
+#         self.enc3 = conv_block(128, 256)
+#         self.enc4 = conv_block(256, 512)
+#         self.pool = nn.MaxPool3d(kernel_size=2, stride=2)
+
+#         # Bottleneck
+#         self.bottleneck = conv_block(512, 1024)
+
+#         # Decoder
+#         # output_padding = (D_pad, H_pad, W_pad)
+#         self.up4 = upsample(1024, 512)  # fixes depth 3→6
+#         self.dec4 = conv_block(1024, 512)
+#         self.up3 = upsample(512, 256)  # no padding needed
+#         self.dec3 = conv_block(512, 256)
+#         self.up2 = upsample(256, 128)  # no padding needed
+#         self.dec2 = conv_block(256, 128)
+#         self.up1 = upsample(128, 64, output_padding=(1,0,0))  # fixes final depth 48 -> 49
+#         self.dec1 = conv_block(128, 64)
+
+#         # Final output layer
+#         self.final = nn.Conv3d(64, out_channels, kernel_size=1)
+
+#     def forward(self, x):
+#         # Encoder
+#         e1 = self.enc1(x) # B x 64 x 49 x 256 x 256
+#         e2 = self.enc2(self.pool(e1)) # B x 128 x 24 x 128 x 128
+#         e3 = self.enc3(self.pool(e2)) # B x 256 x 12 x 64 x 64
+#         e4 = self.enc4(self.pool(e3)) # B x 512 x 6 x 32 x 32
+#         b = self.bottleneck(self.pool(e4)) # B x 1024 x 3 x 16 x 16
+
+#         # Decoder
+#         d4 = self.dec4(torch.cat((self.up4(b), e4), dim=1))
+#         d3 = self.dec3(torch.cat((self.up3(d4), e3), dim=1))
+#         d2 = self.dec2(torch.cat((self.up2(d3), e2), dim=1))
+#         d1 = self.dec1(torch.cat((self.up1(d2), e1), dim=1))
+
+#         return self.final(d1)
+    
+
+# class UNet3D_Aniso(nn.Module):
+#     """
+#     UNet3D with anisotropic pooling to preserve more depth resolution.
+#     Pooling strides: (2,2,2), (2,2,2), (1,2,2), (1,2,2)
+#     Corresponding upsampling uses the same strides reversed.
+#     """
+#     def __init__(self, in_channels=1, out_channels=1, base_filters=64):
+#         super().__init__()
+#         self.n_classes = out_channels
+
+#         def conv_block(in_c, out_c):
+#             return nn.Sequential(
+#                 nn.Conv3d(in_c, out_c, kernel_size=3, padding=1),
+#                 nn.BatchNorm3d(out_c),
+#                 nn.ReLU(inplace=True),
+#                 nn.Conv3d(out_c, out_c, kernel_size=3, padding=1),
+#                 nn.BatchNorm3d(out_c),
+#                 nn.ReLU(inplace=True),
+#                 nn.Conv3d(out_c, out_c, kernel_size=3, padding=1),
+#                 nn.BatchNorm3d(out_c),
+#                 nn.ReLU(inplace=True)
+#             )
+
+#         # anisotropic pooling kernels/strides
+#         self.pool1 = nn.MaxPool3d(kernel_size=(2,2,2), stride=(2,2,2))
+#         self.pool2 = nn.MaxPool3d(kernel_size=(2,2,2), stride=(2,2,2))
+#         self.pool3 = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
+#         self.pool4 = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
+
+#         # Encoder
+#         f = base_filters
+#         self.enc1 = conv_block(in_channels, f)
+#         self.enc2 = conv_block(f, f*2)
+#         self.enc3 = conv_block(f*2, f*4)
+#         self.enc4 = conv_block(f*4, f*8)
+
+#         # Bottleneck
+#         self.bottleneck = conv_block(f*8, f*16)
+
+#         # Decoder - use ConvTranspose3d with matching strides
+#         self.up4 = nn.ConvTranspose3d(f*16, f*8, kernel_size=(1,2,2), stride=(1,2,2))
+#         self.dec4 = conv_block(f*16, f*8)
+
+#         self.up3 = nn.ConvTranspose3d(f*8, f*4, kernel_size=(1,2,2), stride=(1,2,2))
+#         self.dec3 = conv_block(f*8, f*4)
+
+#         self.up2 = nn.ConvTranspose3d(f*4, f*2, kernel_size=(2,2,2), stride=(2,2,2))
+#         self.dec2 = conv_block(f*4, f*2)
+
+#         self.up1 = nn.ConvTranspose3d(f*2, f, kernel_size=(2,2,2), stride=(2,2,2), output_padding=(1,0,0))
+#         self.dec1 = conv_block(f*2, f)
+
+#         self.final = nn.Conv3d(f, out_channels, kernel_size=1)
+
+#     def forward(self, x):
+#         # Encoder
+#         e1 = self.enc1(x)                # B x f x 49 x 256 x 256
+#         p1 = self.pool1(e1)             # 24 x 128 x 128
+#         e2 = self.enc2(p1)              # B x 2f x 24 x 128 x 128
+#         p2 = self.pool2(e2)             # 12 x 64 x 64
+#         e3 = self.enc3(p2)              # B x 4f x 12 x 64 x 64
+#         p3 = self.pool3(e3)             # 12 x 32 x 32 (depth preserved)
+#         e4 = self.enc4(p3)              # B x 8f x 12 x 32 x 32
+#         p4 = self.pool4(e4)             # 12 x 16 x 16 (depth preserved)
+#         b = self.bottleneck(p4)         # B x 16f x 12 x 16 x 16
+
+#         # Decoder (reverse order of pooling)
+#         u4 = self.up4(b)                # B x 8f x 12 x 32 x 32
+#         d4 = self.dec4(torch.cat((u4, e4), dim=1))
+
+#         u3 = self.up3(d4)               # B x 4f x 12 x 64 x 64
+#         d3 = self.dec3(torch.cat((u3, e3), dim=1))
+
+#         u2 = self.up2(d3)               # B x 2f x 24 x 128 x 128
+#         d2 = self.dec2(torch.cat((u2, e2), dim=1))
+
+#         u1 = self.up1(d2)               # B x f x 49 x 256 x 256 (may need output_padding)
+#         # if up1 produces 48 in depth, you may need output_padding=(1,0,0) depending on input dims
+#         # concatenate with e1
+#         d1 = self.dec1(torch.cat((u1, e1), dim=1))
+
+#         return self.final(d1)
 
 class UNet3D_Aniso2(nn.Module):
     """
@@ -2457,7 +2629,8 @@ class UNet3DFrawley(torch.nn.Module):
         self.conv_up_01 = torch.nn.Conv3d(2*k, 2*k, 3, padding=1)
         self.bn_up_01 = torch.nn.BatchNorm3d(2*k)
         self.relu_up_01 = torch.nn.ReLU()
-        self.conv_up_02 = torch.nn.ConvTranspose3d(2*k, out_channels, kernel_size=[2, 1, 1], stride=1, padding=0) 
+        # self.conv_up_02 = torch.nn.ConvTranspose3d(2*k, out_channels, kernel_size=[2, 1, 1], stride=1, padding=0) # this was used to upsample only in Z, but we can replace with a regular conv3d if we don't want that anisotropic upsampling.
+        self.conv_up_02 = torch.nn.Conv3d(2*k, out_channels, 1) # 2k is #channels, out_channels is 1 for binary segmentation, kernel_size=1 for 1x1 conv to produce final output channels
 
     def forward(self, x):
         # DOWN CONV
