@@ -2989,6 +2989,29 @@ class UNet2DEnc3DDec(nn.Module):
         kz_dec3: int = 3,         # H/4
         kz_dec2: int = 1,         # H/2
         kz_dec1: int = 1,         # H
+		# --- Why kz tapers from 3 (deep) to 1 (shallow) ---
+			# Slice spacing is FIXED everywhere: D is never downsampled (we only pool/upsample
+			# in-plane), so a kz=3 kernel always spans the same 3 physically-adjacent B-scans
+			# at every scale. Shallow layers are NOT "closer in depth" than deep ones.
+			#
+			# What changes with depth is the IN-PLANE receptive field:
+			#   - Deep/coarse (bottleneck, dec4, dec3 -> kz=3): each voxel summarizes a large
+			#     retinal region. Cross-slice mixing here asks "do neighbouring slices agree on
+			#     roughly where the ELM sits?" -> robust, low-frequency coherence. Tolerant of
+			#     large through-plane spacing because we're comparing context, not pixels.
+			#   - Shallow/fine (dec2, dec1 -> kz=1): each voxel is ~1 pixel. With anisotropic
+			#     OCT spacing the ELM can legitimately sit at a different in-plane height in the
+			#     next slice, so pixel-level cross-slice blending averages misaligned boundaries
+			#     and smears the edge (worst near macular-hole discontinuities). Stay in-plane.
+			#
+			# Rule of thumb: mix slices where the representation is coarse enough that
+			# slice-to-slice misalignment is invisible (= deep), stay strictly 2D where detail
+			# is pixel-precise and slice-specific (= shallow). Encoder is 2D for the same reason.
+			#
+			# NOTE: this is tuned for ANISOTROPIC volumes. If spacing were ~isotropic (slices
+			# close, ELM pixel-aligned across them), full-res kz=3 could help instead of hurt.
+			# The disabled z_refine block (3,1,1) is the escape hatch: cheap depth-only mixing
+			# at full res without coupling it to in-plane convs, if coherence looks off.
     ):
         super().__init__()
         self.n_classes = out_channels
