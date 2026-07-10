@@ -29,3 +29,7 @@ line_check.py
 match.py
 split_data.ipynb
 tif2npy.py
+nnUNet_preprocessed/*
+.codex
+.CLAUDE.md
+nnUNet_results/*
