@@ -3,8 +3,10 @@ import csv
 from collections import defaultdict
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
+from PIL import Image
 from scipy import ndimage as ndi
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -138,6 +140,21 @@ def surface_dice_3d(pred01: np.ndarray, gt01: np.ndarray, tol_vox=2, spacing=(1.
     return float(safe_div(matched_pred + matched_gt, pred_surface.sum() + gt_surface.sum()))
 
 
+def load_native_mask_volume(mask_dir: Path, eye_id: str, n_slices: int) -> np.ndarray:
+    slices = [
+        (np.array(Image.open(mask_dir / f"{eye_id}-{i}.png")) > 0).astype(np.uint8)
+        for i in range(n_slices)
+    ]
+    return np.stack(slices)
+
+
+def upsample_pred_volume(pred_vol: np.ndarray, native_hw) -> np.ndarray:
+    h, w = native_hw
+    return np.stack(
+        [cv2.resize(s, (w, h), interpolation=cv2.INTER_NEAREST) for s in pred_vol]
+    )
+
+
 def match_depth(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
     pred_depth = pred.shape[2]
     gt_depth = gt.shape[2]
@@ -251,6 +268,14 @@ def main():
     parser.add_argument("--spacing_y", type=float, default=1.0)
     parser.add_argument("--spacing_x", type=float, default=1.0)
     parser.add_argument(
+        "--native_res",
+        action="store_true",
+        help="Score against native per-slice resolution instead of the 256x256 eval "
+             "size: reloads ground-truth mask volumes from disk at their original size "
+             "and upsamples predictions to match (nearest-neighbor), for comparability "
+             "with nnU-Net's native-resolution evaluation (see nnunet/predict_cv.py).",
+    )
+    parser.add_argument(
         "--out_dir",
         type=str,
         default=None,
@@ -260,7 +285,8 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_root = Path(args.model_root)
-    out_dir = Path(args.out_dir) if args.out_dir else (model_root / "cv_eval_3d")
+    default_dir_name = "cv_eval_3d_native" if args.native_res else "cv_eval_3d"
+    out_dir = Path(args.out_dir) if args.out_dir else (model_root / default_dir_name)
     out_dir.mkdir(parents=True, exist_ok=True)
     spacing = (args.spacing_z, args.spacing_y, args.spacing_x)
 
@@ -270,6 +296,7 @@ def main():
     all_eye_summary_rows = []
 
     data_root = Path(args.base_dir) / "data_no_anomalies"
+    native_mask_dir = data_root / "all" / "mask"
 
     for fold in tqdm(range(args.num_folds), desc="Folds"):
         ckpt = find_fold_checkpoint(model_root, fold)
@@ -323,6 +350,10 @@ def main():
                     eye_id = batch["patient_id"][i]
                     pred_np = pred[i, 0].detach().cpu().numpy().astype(np.uint8)
                     gt_np = gt_bin[i, 0].detach().cpu().numpy().astype(np.uint8)
+
+                    if args.native_res:
+                        gt_np = load_native_mask_volume(native_mask_dir, eye_id, n_slices=gt_np.shape[0])
+                        pred_np = upsample_pred_volume(pred_np, gt_np.shape[1:])
 
                     tp, fp, tn, fn = confusion_counts(pred_np, gt_np)
                     dice, iou, sen, fpr = dice_iou_sen_fpr(tp, fp, tn, fn)
@@ -529,7 +560,9 @@ python predict_cv3d.py \
     --model_root elm-results/UNet3DFrawley_Jun-09-2026_1509_model \
     --model UNet3DFrawley
 
-
+python predict_cv3d.py \
+    --model_root elm-results/UNet2p5D_SlidingWindow_Jun-11-2026_0120_model \
+    --model UNet2p5D_SlidingWindow
 
     
 

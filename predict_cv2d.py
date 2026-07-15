@@ -8,6 +8,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+from PIL import Image
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -124,6 +125,15 @@ def assd_and_hausdorff(pred01: np.ndarray, gt01: np.ndarray):
     return assd, hd, hd95
 
 
+def load_native_mask(mask_dir: Path, image_name: str):
+    return (np.array(Image.open(mask_dir / image_name)) > 0).astype(np.uint8)
+
+
+def upsample_pred_2d(pred01: np.ndarray, target_hw):
+    h, w = target_hw
+    return cv2.resize(pred01, (w, h), interpolation=cv2.INTER_NEAREST)
+
+
 def summarize_list(xs):
     xs = np.array(xs, dtype=np.float64)
     xs = xs[np.isfinite(xs)]
@@ -222,6 +232,14 @@ def main():
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--tol", type=int, default=2)
     parser.add_argument(
+        "--native_res",
+        action="store_true",
+        help="Score against native per-slice resolution instead of the 256x256 eval "
+             "size: reloads ground-truth masks from disk at their original size and "
+             "upsamples predictions to match (nearest-neighbor), for comparability "
+             "with nnU-Net's native-resolution evaluation (see nnunet/predict_cv.py).",
+    )
+    parser.add_argument(
         "--out_dir",
         type=str,
         default=None,
@@ -231,7 +249,8 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_root = Path(args.model_root)
-    out_dir = Path(args.out_dir) if args.out_dir else (model_root / "cv_eval")
+    default_dir_name = "cv_eval_native" if args.native_res else "cv_eval"
+    out_dir = Path(args.out_dir) if args.out_dir else (model_root / default_dir_name)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     fold_summary_rows = []
@@ -256,6 +275,7 @@ def main():
         net.eval()
 
         data_root = os.path.join(args.base_dir, "data_no_anomalies")
+        native_mask_dir = Path(data_root) / "all" / "mask"
         transform_val = make_2d_transforms(train=False, out_size=(256, 256))
         ds = BasicDataset(
             root_dir=data_root,
@@ -312,6 +332,10 @@ def main():
 
                     pred_np = pred[i].squeeze().detach().cpu().numpy().astype(np.uint8)
                     gt_np = gt_bin[i].squeeze().detach().cpu().numpy().astype(np.uint8)
+
+                    if args.native_res:
+                        gt_np = load_native_mask(native_mask_dir, image_name)
+                        pred_np = upsample_pred_2d(pred_np, gt_np.shape)
 
                     tp, fp, tn, fn = confusion_counts(pred_np, gt_np)
                     dice, iou, sen, fpr = dice_iou_sen_fpr(tp, fp, tn, fn)
