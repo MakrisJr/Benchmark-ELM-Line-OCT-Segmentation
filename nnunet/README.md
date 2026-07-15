@@ -46,7 +46,15 @@ nnU-Net's raw format assumes one *fixed* test set held out from `imagesTr`. This
    ./nnunet/submit_folds.sh
    ```
 
-4. **Predict + evaluate** on each fold's held-out test cases (from `test_cases_per_fold.json`) with `nnUNetv2_predict`, then score against `labelsTr` the same way the other models are scored in this repo.
+4. **Predict + evaluate** (`nnunet/predict_cv.py`, GPU required) -- once every fold has finished training, run this once per trained `(dataset_id, configuration)` combo. For each fold it symlinks that fold's held-out test cases (from `test_cases_per_fold.json`) into a temp input folder, runs `nnUNetv2_predict` with only that fold's model (`-f <fold>`), then scores the predictions against `labelsTr`. Dataset001_ELM2D cases are per-slice, scored like `predict_cv2d.py` (per-slice metrics + pooled per-eye aggregation); Dataset002_ELM3D cases are per-eye volumes regardless of whether `2d` or `3d_fullres` was trained, scored like `predict_cv3d.py` (per-volume metrics). Output CSVs use the same `vol_*_pooled`/`vol_*_mean` column names as those two scripts, so they plug directly into `compare_csvs.py`:
+
+   ```bash
+   python nnunet/predict_cv.py --dataset_id 1 --configuration 2d
+   python nnunet/predict_cv.py --dataset_id 2 --configuration 2d
+   python nnunet/predict_cv.py --dataset_id 2 --configuration 3d_fullres
+   ```
+
+   Or submit all 3 combos as sbatch jobs at once with `nnunet/submit_predictions.sh`. CSVs land in `nnUNet_results/<dataset>/<trainer>__<plans>__<configuration>/cv_eval/` (`cv_fold_summary.csv`, `cv_per_patient_all_folds.csv`, `cv_oof_eye_summary.csv`, plus per-fold per-slice/per-volume CSVs).
 
 ## Known caveats to revisit
 
