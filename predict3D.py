@@ -9,7 +9,15 @@ import  csv
 
 from elm.dataset import D3Dataset
 from elm.model import CSAM_UNet2p5D, UNet3DFrawley, UNet2DEnc3DDec, UNet3D, UNet3D_Aniso, UNet2p5D_SlidingWindow, SwinUNETR3D
-from scipy import ndimage as ndi
+from elm.metrics import (
+    confusion_counts as confusion_counts_np,
+    dice_iou_sen_fpr,
+    rmse as rmse_voxel,
+    assd_hd_hd95_3d,
+    boundary_f1_3d,
+    surface_dice_3d,
+    summarize_list,
+)
 
 EXPORT_ONLY = True
 EXPORT_EYES = {"919", "945", "990"}     # example
@@ -114,9 +122,6 @@ def save_paper_slices_for_volume(pred01, gt01, eye_id, image_dir, paper_dir, sel
         cv2.imwrite(prefix + "_D_gtPredContours.png", both_overlay)
         cv2.imwrite(prefix + "_E_errTPFPFN.png", err_overlay)
 
-def safe_div(n, d, eps=1e-12):
-    return float(n) / float(d + eps)
-
 def write_per_patient_csv(path, rows):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fieldnames = list(rows[0].keys()) if rows else ["eye_id"]
@@ -125,32 +130,6 @@ def write_per_patient_csv(path, rows):
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
-
-def confusion_counts_np(pred, gt):
-    # pred, gt are uint8 {0,1}
-    tp = int(np.logical_and(pred == 1, gt == 1).sum())
-    fp = int(np.logical_and(pred == 1, gt == 0).sum())
-    tn = int(np.logical_and(pred == 0, gt == 0).sum())
-    fn = int(np.logical_and(pred == 0, gt == 1).sum())
-    return tp, fp, tn, fn
-
-def dice_iou_sen_fpr(tp, fp, tn, fn, eps=1e-12):
-    dice = safe_div(2 * tp, 2 * tp + fp + fn, eps)
-    iou  = safe_div(tp, tp + fp + fn, eps)
-    sen  = safe_div(tp, tp + fn, eps)
-    fpr  = safe_div(fp, fp + tn, eps)
-    return dice, iou, sen, fpr
-
-def rmse_voxel(pred, gt):
-    diff = pred.astype(np.float32) - gt.astype(np.float32)
-    return float(np.sqrt(np.mean(diff * diff)))
-
-def summarize_list(xs):
-    xs = np.array(xs, dtype=np.float64)
-    xs = xs[np.isfinite(xs)]
-    if xs.size == 0:
-        return float("nan"), float("nan")
-    return float(xs.mean()), float(xs.std(ddof=1)) if xs.size > 1 else 0.0
 
 def match_depth(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
     """
@@ -198,118 +177,6 @@ def dice_from_binary(pred: torch.Tensor, gt: torch.Tensor, smooth: float = 1e-7)
     p = pred.sum(dim=dims)
     g = gt.sum(dim=dims)
     return (2.0 * inter + smooth) / (p + g + smooth)
-
-# -----------------------------
-# 3D surface/boundary metrics
-# -----------------------------
-def _require_scipy():
-    if ndi is None:
-        raise ImportError(
-            "SciPy is required for 3D ASSD/HD/HD95 and 3D boundary metrics. "
-            "Install with: pip install scipy"
-        )
-
-def surface_voxels_3d(mask01: np.ndarray) -> np.ndarray:
-    """
-    Returns a boolean array of surface voxels for a 3D binary mask.
-    surface = mask XOR erode(mask)
-    """
-    _require_scipy()
-    mask = mask01.astype(bool)
-    if mask.sum() == 0:
-        return np.zeros_like(mask, dtype=bool)
-    structure = ndi.generate_binary_structure(rank=3, connectivity=1)  # 6-neighbourhood
-    er = ndi.binary_erosion(mask, structure=structure, iterations=1, border_value=0)
-    surf = np.logical_and(mask, np.logical_not(er))
-    return surf
-
-def assd_hd_hd95_3d(pred01: np.ndarray, gt01: np.ndarray, spacing=(1.0, 1.0, 1.0)):
-    """
-    ASSD, HD, HD95 computed on 3D surfaces using Euclidean distance transform.
-    spacing: (z,y,x) voxel spacing in your physical unit (mm/um/etc). If you keep 1, it's in voxels.
-    """
-    _require_scipy()
-    p = pred01.astype(bool)
-    g = gt01.astype(bool)
-
-    ps = surface_voxels_3d(p)
-    gs = surface_voxels_3d(g)
-
-    if ps.sum() == 0 and gs.sum() == 0:
-        return 0.0, 0.0, 0.0
-    if ps.sum() == 0 or gs.sum() == 0:
-        return float("inf"), float("inf"), float("inf")
-
-    # distance to nearest surface voxel: compute EDT on inverted surface
-    dt_g = ndi.distance_transform_edt(~gs, sampling=spacing)
-    dt_p = ndi.distance_transform_edt(~ps, sampling=spacing)
-
-    d_p_to_g = dt_g[ps].astype(np.float64)
-    d_g_to_p = dt_p[gs].astype(np.float64)
-
-    all_d = np.concatenate([d_p_to_g, d_g_to_p], axis=0)
-    assd = float(all_d.mean())
-    hd = float(all_d.max())
-    hd95 = float(np.percentile(all_d, 95))
-    return assd, hd, hd95
-
-def boundary_f1_3d(pred01: np.ndarray, gt01: np.ndarray, tol_vox=2, spacing=(1.0, 1.0, 1.0)):
-    """
-    3D Boundary F1 with tolerance using distance transforms on surfaces.
-    tol_vox is interpreted in *voxels* unless you also change spacing;
-    actual tolerance distance is tol_vox * spacing if spacing != 1 isotropically.
-    """
-    _require_scipy()
-    p = pred01.astype(bool)
-    g = gt01.astype(bool)
-
-    ps = surface_voxels_3d(p)
-    gs = surface_voxels_3d(g)
-
-    if ps.sum() == 0 and gs.sum() == 0:
-        return 1.0
-    if ps.sum() == 0 or gs.sum() == 0:
-        return 0.0
-
-    # threshold in physical units: tol_vox * 1 voxel in each direction isn't fully well-defined if anisotropic.
-    # We interpret tol_vox as a *distance* in the same unit as EDT output when spacing is provided.
-    tol_dist = float(tol_vox)
-
-    dt_g = ndi.distance_transform_edt(~gs, sampling=spacing)
-    dt_p = ndi.distance_transform_edt(~ps, sampling=spacing)
-
-    # precision: predicted surface points within tol of gt surface
-    prec = safe_div((dt_g[ps] <= tol_dist).sum(), ps.sum())
-    # recall: gt surface points within tol of predicted surface
-    rec  = safe_div((dt_p[gs] <= tol_dist).sum(), gs.sum())
-
-    return float(safe_div(2 * prec * rec, (prec + rec)))
-
-def surface_dice_3d(pred01: np.ndarray, gt01: np.ndarray, tol_vox=2, spacing=(1.0, 1.0, 1.0)):
-    """
-    "Surface Dice" analogue: symmetric surface overlap within tolerance.
-    """
-    _require_scipy()
-    p = pred01.astype(bool)
-    g = gt01.astype(bool)
-
-    ps = surface_voxels_3d(p)
-    gs = surface_voxels_3d(g)
-
-    if ps.sum() == 0 and gs.sum() == 0:
-        return 1.0
-    if ps.sum() == 0 or gs.sum() == 0:
-        return 0.0
-
-    tol_dist = float(tol_vox)
-
-    dt_g = ndi.distance_transform_edt(~gs, sampling=spacing)
-    dt_p = ndi.distance_transform_edt(~ps, sampling=spacing)
-
-    matched_p = (dt_g[ps] <= tol_dist).sum()
-    matched_g = (dt_p[gs] <= tol_dist).sum()
-
-    return float(safe_div(matched_p + matched_g, ps.sum() + gs.sum()))
 
 # -----------------------------
 # Main evaluation

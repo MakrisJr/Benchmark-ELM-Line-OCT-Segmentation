@@ -11,6 +11,15 @@ from torch.autograd import Variable
 from efficientunet import *
 from elm.dice_loss import dice_coeff
 from elm.model import SwinEncoderUNet2D, U_Net,AttU_Net, LinkNetImprove, U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet
+from elm.metrics import (
+    confusion_counts,
+    dice_iou_sen_fpr,
+    rmse as rmse_pixel,
+    boundary_f1_2d as boundary_f1,
+    surface_dice_2d as surface_dice,
+    assd_hd_hd95_2d as assd_and_hausdorff,
+    summarize_list,
+)
 import re
 from collections import defaultdict
 import csv
@@ -105,121 +114,6 @@ def write_per_patient_csv(path: str, rows: list):
         w.writeheader()
         for r in rows:
             w.writerow(r)
-
-def safe_div(n, d, eps=1e-12):
-    return float(n) / float(d + eps)
-
-def confusion_counts(pred, gt):
-    # pred, gt are uint8 {0,1}
-    tp = int(np.logical_and(pred == 1, gt == 1).sum())
-    fp = int(np.logical_and(pred == 1, gt == 0).sum())
-    tn = int(np.logical_and(pred == 0, gt == 0).sum())
-    fn = int(np.logical_and(pred == 0, gt == 1).sum())
-    return tp, fp, tn, fn
-
-def dice_iou_sen_fpr(tp, fp, tn, fn, eps=1e-12):
-    dice = safe_div(2 * tp, 2 * tp + fp + fn, eps)
-    iou  = safe_div(tp, tp + fp + fn, eps)
-    sen  = safe_div(tp, tp + fn, eps)                    # recall
-    fpr  = safe_div(fp, fp + tn, eps)
-    return dice, iou, sen, fpr
-
-def rmse_pixel(pred, gt):
-    # Singh et al compute RMSE on valid pixels; here for binary, we compute pixelwise MSE over full image.
-    diff = pred.astype(np.float32) - gt.astype(np.float32)
-    return float(np.sqrt(np.mean(diff * diff)))
-
-def extract_boundary(mask):
-    # 8-connected boundary: mask - eroded(mask)
-    mask255 = (mask.astype(np.uint8) * 255)
-    k = np.ones((3,3), np.uint8)
-    er = cv2.erode(mask255, k, iterations=1)
-    b = cv2.subtract(mask255, er)
-    return (b > 0).astype(np.uint8)
-
-def boundary_f1(pred, gt, tol=2):
-    """
-    Boundary F1 with pixel tolerance 'tol' (in pixels).
-    We dilate boundaries by tol and compute precision/recall on boundary pixels.
-    """
-    pb = extract_boundary(pred)
-    gb = extract_boundary(gt)
-
-    if pb.sum() == 0 and gb.sum() == 0:
-        return 1.0
-    if pb.sum() == 0 or gb.sum() == 0:
-        return 0.0
-
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*tol+1, 2*tol+1))
-    pb_d = cv2.dilate(pb, k, iterations=1)
-    gb_d = cv2.dilate(gb, k, iterations=1)
-
-    # precision: predicted boundary pixels that hit dilated GT boundary
-    prec = safe_div(np.logical_and(pb == 1, gb_d == 1).sum(), pb.sum())
-    # recall: GT boundary pixels that hit dilated predicted boundary
-    rec  = safe_div(np.logical_and(gb == 1, pb_d == 1).sum(), gb.sum())
-    f1 = safe_div(2 * prec * rec, (prec + rec))
-    return float(f1)
-
-def surface_dice(pred, gt, tol=2):
-    """
-    "Surface Dice" approximation: Dice computed on boundary pixels, allowing tolerance via dilation.
-    """
-    pb = extract_boundary(pred)
-    gb = extract_boundary(gt)
-
-    if pb.sum() == 0 and gb.sum() == 0:
-        return 1.0
-    if pb.sum() == 0 or gb.sum() == 0:
-        return 0.0
-
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*tol+1, 2*tol+1))
-    pb_d = cv2.dilate(pb, k, iterations=1)
-    gb_d = cv2.dilate(gb, k, iterations=1)
-
-    # boundary matches with tolerance
-    inter = (np.logical_and(pb == 1, gb_d == 1).sum() +
-             np.logical_and(gb == 1, pb_d == 1).sum())
-    denom = (pb.sum() + gb.sum())
-    return safe_div(inter, denom)
-
-def distance_transform(mask):
-    """
-    cv2.distanceTransform expects 0 background, non-zero foreground.
-    returns float32 distances for each pixel to nearest zero pixel.
-    We'll use it to get distances from boundary sets efficiently.
-    """
-    return cv2.distanceTransform(mask.astype(np.uint8), distanceType=cv2.DIST_L2, maskSize=3)
-
-def assd_and_hausdorff(pred, gt):
-    """
-    Compute ASSD, HD, HD95 using distance transforms of boundary maps.
-    No SciPy required.
-    """
-    pb = extract_boundary(pred)
-    gb = extract_boundary(gt)
-
-    # Edge cases
-    if pb.sum() == 0 and gb.sum() == 0:
-        return 0.0, 0.0, 0.0
-    if pb.sum() == 0 or gb.sum() == 0:
-        # undefined/infinite distances; return large numbers
-        return float("inf"), float("inf"), float("inf")
-
-    # Distance to nearest boundary pixel:
-    # Make boundary pixels = 0, everything else = 1, then distanceTransform gives distance to 0.
-    dt_g = distance_transform(1 - gb)   # distances to GT boundary
-    dt_p = distance_transform(1 - pb)   # distances to Pred boundary
-
-    # Directed distances: boundary pixels sample their distances to other boundary
-    d_p_to_g = dt_g[pb == 1].astype(np.float64)
-    d_g_to_p = dt_p[gb == 1].astype(np.float64)
-
-    all_d = np.concatenate([d_p_to_g, d_g_to_p], axis=0)
-    assd = float(all_d.mean())
-    hd = float(all_d.max())
-    hd95 = float(np.percentile(all_d, 95))
-    return assd, hd, hd95
 
 def patient_id_from_filename(fname):
     """
@@ -401,12 +295,6 @@ with torch.no_grad():
 
 
 # ---- Report ----
-def summarize_list(xs):
-    xs = np.array(xs, dtype=np.float64)
-    xs = xs[np.isfinite(xs)]
-    if xs.size == 0:
-        return float("nan"), float("nan")
-    return float(xs.mean()), float(xs.std(ddof=1)) if xs.size > 1 else 0.0
 
 print("\n====================")
 n = len(metrics["dice"])

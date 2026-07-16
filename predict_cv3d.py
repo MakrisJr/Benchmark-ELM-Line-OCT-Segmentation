@@ -7,7 +7,6 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
-from scipy import ndimage as ndi
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -24,120 +23,16 @@ from elm.model import (
     PadCropWrapper,
 )
 from elm.csam import CSAM_UNet2p5D
-
-
-def safe_div(n, d, eps=1e-12):
-    return float(n) / float(d + eps)
-
-
-def confusion_counts(pred01: np.ndarray, gt01: np.ndarray):
-    tp = int(np.logical_and(pred01 == 1, gt01 == 1).sum())
-    fp = int(np.logical_and(pred01 == 1, gt01 == 0).sum())
-    tn = int(np.logical_and(pred01 == 0, gt01 == 0).sum())
-    fn = int(np.logical_and(pred01 == 0, gt01 == 1).sum())
-    return tp, fp, tn, fn
-
-
-def dice_iou_sen_fpr(tp, fp, tn, fn, eps=1e-12):
-    dice = safe_div(2 * tp, 2 * tp + fp + fn, eps)
-    iou = safe_div(tp, tp + fp + fn, eps)
-    sen = safe_div(tp, tp + fn, eps)
-    fpr = safe_div(fp, fp + tn, eps)
-    return dice, iou, sen, fpr
-
-
-def rmse_voxel(pred01: np.ndarray, gt01: np.ndarray):
-    diff = pred01.astype(np.float32) - gt01.astype(np.float32)
-    return float(np.sqrt(np.mean(diff * diff)))
-
-
-def summarize_list(xs):
-    xs = np.array(xs, dtype=np.float64)
-    xs = xs[np.isfinite(xs)]
-    if xs.size == 0:
-        return float("nan"), float("nan")
-    return float(xs.mean()), float(xs.std(ddof=1)) if xs.size > 1 else 0.0
-
-
-def summarize_rows(rows: list, key: str):
-    vals = [r.get(key, float("nan")) for r in rows]
-    return summarize_list(vals)
-
-
-def surface_voxels_3d(mask01: np.ndarray) -> np.ndarray:
-    mask = mask01.astype(bool)
-    if mask.sum() == 0:
-        return np.zeros_like(mask, dtype=bool)
-    structure = ndi.generate_binary_structure(rank=3, connectivity=1)
-    eroded = ndi.binary_erosion(mask, structure=structure, iterations=1, border_value=0)
-    return np.logical_and(mask, np.logical_not(eroded))
-
-
-def assd_hd_hd95_3d(pred01: np.ndarray, gt01: np.ndarray, spacing=(1.0, 1.0, 1.0)):
-    pred = pred01.astype(bool)
-    gt = gt01.astype(bool)
-
-    pred_surface = surface_voxels_3d(pred)
-    gt_surface = surface_voxels_3d(gt)
-
-    if pred_surface.sum() == 0 and gt_surface.sum() == 0:
-        return 0.0, 0.0, 0.0
-    if pred_surface.sum() == 0 or gt_surface.sum() == 0:
-        return float("inf"), float("inf"), float("inf")
-
-    dt_gt = ndi.distance_transform_edt(~gt_surface, sampling=spacing)
-    dt_pred = ndi.distance_transform_edt(~pred_surface, sampling=spacing)
-
-    d_pred_to_gt = dt_gt[pred_surface].astype(np.float64)
-    d_gt_to_pred = dt_pred[gt_surface].astype(np.float64)
-    all_d = np.concatenate([d_pred_to_gt, d_gt_to_pred], axis=0)
-
-    assd = float(all_d.mean())
-    hd = float(all_d.max())
-    hd95 = float(np.percentile(all_d, 95))
-    return assd, hd, hd95
-
-
-def boundary_f1_3d(pred01: np.ndarray, gt01: np.ndarray, tol_vox=2, spacing=(1.0, 1.0, 1.0)):
-    pred = pred01.astype(bool)
-    gt = gt01.astype(bool)
-
-    pred_surface = surface_voxels_3d(pred)
-    gt_surface = surface_voxels_3d(gt)
-
-    if pred_surface.sum() == 0 and gt_surface.sum() == 0:
-        return 1.0
-    if pred_surface.sum() == 0 or gt_surface.sum() == 0:
-        return 0.0
-
-    tol_dist = float(tol_vox)
-    dt_gt = ndi.distance_transform_edt(~gt_surface, sampling=spacing)
-    dt_pred = ndi.distance_transform_edt(~pred_surface, sampling=spacing)
-
-    prec = safe_div((dt_gt[pred_surface] <= tol_dist).sum(), pred_surface.sum())
-    rec = safe_div((dt_pred[gt_surface] <= tol_dist).sum(), gt_surface.sum())
-    return float(safe_div(2 * prec * rec, prec + rec))
-
-
-def surface_dice_3d(pred01: np.ndarray, gt01: np.ndarray, tol_vox=2, spacing=(1.0, 1.0, 1.0)):
-    pred = pred01.astype(bool)
-    gt = gt01.astype(bool)
-
-    pred_surface = surface_voxels_3d(pred)
-    gt_surface = surface_voxels_3d(gt)
-
-    if pred_surface.sum() == 0 and gt_surface.sum() == 0:
-        return 1.0
-    if pred_surface.sum() == 0 or gt_surface.sum() == 0:
-        return 0.0
-
-    tol_dist = float(tol_vox)
-    dt_gt = ndi.distance_transform_edt(~gt_surface, sampling=spacing)
-    dt_pred = ndi.distance_transform_edt(~pred_surface, sampling=spacing)
-
-    matched_pred = (dt_gt[pred_surface] <= tol_dist).sum()
-    matched_gt = (dt_pred[gt_surface] <= tol_dist).sum()
-    return float(safe_div(matched_pred + matched_gt, pred_surface.sum() + gt_surface.sum()))
+from elm.metrics import (
+    confusion_counts,
+    dice_iou_sen_fpr,
+    rmse as rmse_voxel,
+    assd_hd_hd95_3d,
+    boundary_f1_3d,
+    surface_dice_3d,
+    summarize_list,
+    summarize_rows,
+)
 
 
 def load_native_mask_volume(mask_dir: Path, eye_id: str, n_slices: int) -> np.ndarray:
@@ -564,7 +459,7 @@ python predict_cv3d.py \
     --model_root elm-results/UNet2p5D_SlidingWindow_Jun-11-2026_0120_model \
     --model UNet2p5D_SlidingWindow
 
-    
+add --native_res to evaluate against native resolution (like nnU-Net)
 
 
 """

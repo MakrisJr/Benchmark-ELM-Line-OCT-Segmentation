@@ -24,105 +24,16 @@ from elm.model import (
     SegNet,
     SwinEncoderUNet2D,
 )
-
-
-def safe_div(n, d, eps=1e-12):
-    return float(n) / float(d + eps)
-
-
-def confusion_counts(pred01: np.ndarray, gt01: np.ndarray):
-    tp = int(np.logical_and(pred01 == 1, gt01 == 1).sum())
-    fp = int(np.logical_and(pred01 == 1, gt01 == 0).sum())
-    tn = int(np.logical_and(pred01 == 0, gt01 == 0).sum())
-    fn = int(np.logical_and(pred01 == 0, gt01 == 1).sum())
-    return tp, fp, tn, fn
-
-
-def dice_iou_sen_fpr(tp, fp, tn, fn, eps=1e-12):
-    dice = safe_div(2 * tp, 2 * tp + fp + fn, eps)
-    iou = safe_div(tp, tp + fp + fn, eps)
-    sen = safe_div(tp, tp + fn, eps)
-    fpr = safe_div(fp, fp + tn, eps)
-    return dice, iou, sen, fpr
-
-
-def rmse_pixel(pred01: np.ndarray, gt01: np.ndarray):
-    diff = pred01.astype(np.float32) - gt01.astype(np.float32)
-    return float(np.sqrt(np.mean(diff * diff)))
-
-
-def extract_boundary(mask01: np.ndarray):
-    mask255 = (mask01.astype(np.uint8) * 255)
-    k = np.ones((3, 3), np.uint8)
-    er = cv2.erode(mask255, k, iterations=1)
-    b = cv2.subtract(mask255, er)
-    return (b > 0).astype(np.uint8)
-
-
-def boundary_f1(pred01: np.ndarray, gt01: np.ndarray, tol=2):
-    pb = extract_boundary(pred01)
-    gb = extract_boundary(gt01)
-
-    if pb.sum() == 0 and gb.sum() == 0:
-        return 1.0
-    if pb.sum() == 0 or gb.sum() == 0:
-        return 0.0
-
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * tol + 1, 2 * tol + 1))
-    pb_d = cv2.dilate(pb, k, iterations=1)
-    gb_d = cv2.dilate(gb, k, iterations=1)
-
-    prec = safe_div(np.logical_and(pb == 1, gb_d == 1).sum(), pb.sum())
-    rec = safe_div(np.logical_and(gb == 1, pb_d == 1).sum(), gb.sum())
-    f1 = safe_div(2 * prec * rec, (prec + rec))
-    return float(f1)
-
-
-def surface_dice(pred01: np.ndarray, gt01: np.ndarray, tol=2):
-    pb = extract_boundary(pred01)
-    gb = extract_boundary(gt01)
-
-    if pb.sum() == 0 and gb.sum() == 0:
-        return 1.0
-    if pb.sum() == 0 or gb.sum() == 0:
-        return 0.0
-
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * tol + 1, 2 * tol + 1))
-    pb_d = cv2.dilate(pb, k, iterations=1)
-    gb_d = cv2.dilate(gb, k, iterations=1)
-
-    inter = (
-        np.logical_and(pb == 1, gb_d == 1).sum()
-        + np.logical_and(gb == 1, pb_d == 1).sum()
-    )
-    denom = (pb.sum() + gb.sum())
-    return safe_div(inter, denom)
-
-
-def distance_transform(mask01: np.ndarray):
-    return cv2.distanceTransform(mask01.astype(np.uint8), distanceType=cv2.DIST_L2, maskSize=3)
-
-
-def assd_and_hausdorff(pred01: np.ndarray, gt01: np.ndarray):
-    pb = extract_boundary(pred01)
-    gb = extract_boundary(gt01)
-
-    if pb.sum() == 0 and gb.sum() == 0:
-        return 0.0, 0.0, 0.0
-    if pb.sum() == 0 or gb.sum() == 0:
-        return float("inf"), float("inf"), float("inf")
-
-    dt_g = distance_transform(1 - gb)
-    dt_p = distance_transform(1 - pb)
-
-    d_p_to_g = dt_g[pb == 1].astype(np.float64)
-    d_g_to_p = dt_p[gb == 1].astype(np.float64)
-
-    all_d = np.concatenate([d_p_to_g, d_g_to_p], axis=0)
-    assd = float(all_d.mean())
-    hd = float(all_d.max())
-    hd95 = float(np.percentile(all_d, 95))
-    return assd, hd, hd95
+from elm.metrics import (
+    confusion_counts,
+    dice_iou_sen_fpr,
+    rmse as rmse_pixel,
+    boundary_f1_2d as boundary_f1,
+    surface_dice_2d as surface_dice,
+    assd_hd_hd95_2d as assd_and_hausdorff,
+    summarize_list,
+    summarize_rows,
+)
 
 
 def load_native_mask(mask_dir: Path, image_name: str):
@@ -132,19 +43,6 @@ def load_native_mask(mask_dir: Path, image_name: str):
 def upsample_pred_2d(pred01: np.ndarray, target_hw):
     h, w = target_hw
     return cv2.resize(pred01, (w, h), interpolation=cv2.INTER_NEAREST)
-
-
-def summarize_list(xs):
-    xs = np.array(xs, dtype=np.float64)
-    xs = xs[np.isfinite(xs)]
-    if xs.size == 0:
-        return float("nan"), float("nan")
-    return float(xs.mean()), float(xs.std(ddof=1)) if xs.size > 1 else 0.0
-
-
-def summarize_rows(rows: list, key: str):
-    vals = [r.get(key, float("nan")) for r in rows]
-    return summarize_list(vals)
 
 
 def build_model(model_name: str):
