@@ -33,6 +33,7 @@ from elm.metrics import (
     summarize_list,
     summarize_rows,
 )
+from elm.hole_metrics import analyze_slice_3d, gap_result_to_row_fields, summarize_gap_geometry, summarize_spurious_gaps
 
 
 def load_native_mask_volume(mask_dir: Path, eye_id: str, n_slices: int) -> np.ndarray:
@@ -176,7 +177,29 @@ def main():
         default=None,
         help="Output directory for CSVs (default: <model_root>/cv_eval_3d)",
     )
+    parser.add_argument(
+        "--hole_decomposition",
+        action="store_true",
+        help="On z-slices that cross the macular hole (an interior gap in the "
+             "annotated ELM line), compare the model's own predicted gap against "
+             "the GT gap: whether it bridged straight across (no gap at all), and "
+             "if not, how its width and margins (ELM termination points) compare. "
+             "On z-slices where the annotated line is continuous, also checks "
+             "whether the model predicts a spurious gap anyway (a false-positive "
+             "hole). Writes a per-slice gap-analysis CSV and adds summary fields "
+             "to the per-volume/per-patient CSVs. Requires --native_res, since "
+             "the hole is defined on native-resolution columns.",
+    )
+    parser.add_argument(
+        "--min_gap_width", type=int, default=5,
+        help="Minimum run length (native-res columns) of missing GT columns to "
+             "count as a hole, filtering out annotation jitter (only used with "
+             "--hole_decomposition).",
+    )
     args = parser.parse_args()
+
+    if args.hole_decomposition and not args.native_res:
+        raise ValueError("--hole_decomposition requires --native_res")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_root = Path(args.model_root)
@@ -189,6 +212,7 @@ def main():
     fold_volume_means = defaultdict(list)
     all_volume_rows = []
     all_eye_summary_rows = []
+    all_gap_rows = []
 
     data_root = Path(args.base_dir) / "data_no_anomalies"
     native_mask_dir = data_root / "all" / "mask"
@@ -228,6 +252,7 @@ def main():
         )
 
         volume_rows = []
+        gap_rows = []
 
         with torch.no_grad():
             for batch in tqdm(loader, desc=f"Fold {fold}", leave=False):
@@ -257,29 +282,41 @@ def main():
                     bf1 = boundary_f1_3d(pred_np, gt_np, tol_vox=args.tol, spacing=spacing)
                     sdice = surface_dice_3d(pred_np, gt_np, tol_vox=args.tol, spacing=spacing)
 
-                    volume_rows.append(
-                        {
-                            "fold": fold,
-                            "eye_id": eye_id,
-                            "dice": dice,
-                            "iou": iou,
-                            "sen": sen,
-                            "fpr": fpr,
-                            "rmse": rmse,
-                            "assd": assd,
-                            "hd": hd,
-                            "hd95": hd95,
-                            "bf1_tol2": bf1,
-                            "surf_dice_tol2": sdice,
-                            "tp": tp,
-                            "fp": fp,
-                            "tn": tn,
-                            "fn": fn,
-                            "depth": int(pred_np.shape[0]),
-                            "height": int(pred_np.shape[1]),
-                            "width": int(pred_np.shape[2]),
-                        }
-                    )
+                    volume_row = {
+                        "fold": fold,
+                        "eye_id": eye_id,
+                        "dice": dice,
+                        "iou": iou,
+                        "sen": sen,
+                        "fpr": fpr,
+                        "rmse": rmse,
+                        "assd": assd,
+                        "hd": hd,
+                        "hd95": hd95,
+                        "bf1_tol2": bf1,
+                        "surf_dice_tol2": sdice,
+                        "tp": tp,
+                        "fp": fp,
+                        "tn": tn,
+                        "fn": fn,
+                        "depth": int(pred_np.shape[0]),
+                        "height": int(pred_np.shape[1]),
+                        "width": int(pred_np.shape[2]),
+                    }
+
+                    if args.hole_decomposition:
+                        records = analyze_slice_3d(pred_np, gt_np, min_gap_width=args.min_gap_width)
+                        hole_recs = [r for _, r in records if r["gt_has_gap"]]
+                        cont_recs = [r for _, r in records if not r["gt_has_gap"]]
+                        volume_row.update(summarize_gap_geometry(hole_recs))
+                        volume_row.update(summarize_spurious_gaps(cont_recs))
+                        for slice_idx, r in records:
+                            gap_rows.append({
+                                "fold": fold, "eye_id": eye_id, "slice_idx": slice_idx,
+                                **gap_result_to_row_fields(r),
+                            })
+
+                    volume_rows.append(volume_row)
 
         volume_rows.sort(key=lambda r: r["eye_id"])
 
@@ -322,35 +359,44 @@ def main():
 
         eye_summary_rows = []
         for row in volume_rows:
-            eye_summary_rows.append(
-                {
-                    "fold": row["fold"],
-                    "eye_id": row["eye_id"],
-                    "tp": row["tp"],
-                    "fp": row["fp"],
-                    "tn": row["tn"],
-                    "fn": row["fn"],
-                    "vol_dice_pooled": row["dice"],
-                    "vol_iou_pooled": row["iou"],
-                    "vol_sen_pooled": row["sen"],
-                    "vol_fpr_pooled": row["fpr"],
-                    "vol_rmse_mean": row["rmse"],
-                    "vol_assd_mean": row["assd"],
-                    "vol_hd_mean": row["hd"],
-                    "vol_hd95_mean": row["hd95"],
-                    "vol_bf1_mean": row["bf1_tol2"],
-                    "vol_sdice_mean": row["surf_dice_tol2"],
-                    "depth": row["depth"],
-                    "height": row["height"],
-                    "width": row["width"],
-                }
-            )
+            eye_summary_row = {
+                "fold": row["fold"],
+                "eye_id": row["eye_id"],
+                "tp": row["tp"],
+                "fp": row["fp"],
+                "tn": row["tn"],
+                "fn": row["fn"],
+                "vol_dice_pooled": row["dice"],
+                "vol_iou_pooled": row["iou"],
+                "vol_sen_pooled": row["sen"],
+                "vol_fpr_pooled": row["fpr"],
+                "vol_rmse_mean": row["rmse"],
+                "vol_assd_mean": row["assd"],
+                "vol_hd_mean": row["hd"],
+                "vol_hd95_mean": row["hd95"],
+                "vol_bf1_mean": row["bf1_tol2"],
+                "vol_sdice_mean": row["surf_dice_tol2"],
+                "depth": row["depth"],
+                "height": row["height"],
+                "width": row["width"],
+            }
+            if args.hole_decomposition:
+                for k in ("n_hole_slices", "n_bridged", "bridged_frac",
+                          "mean_width_error", "mean_abs_width_error",
+                          "mean_left_margin_error", "mean_right_margin_error",
+                          "n_continuous_slices", "n_spurious_gaps",
+                          "spurious_gap_frac", "mean_spurious_gap_width"):
+                    eye_summary_row[k] = row[k]
+            eye_summary_rows.append(eye_summary_row)
 
         write_csv(out_dir / f"fold_{fold}_per_volume.csv", volume_rows)
         write_csv(out_dir / f"fold_{fold}_per_patient.csv", eye_summary_rows)
+        if args.hole_decomposition:
+            write_csv(out_dir / f"fold_{fold}_gap_analysis.csv", gap_rows)
 
         all_volume_rows.extend(volume_rows)
         all_eye_summary_rows.extend(eye_summary_rows)
+        all_gap_rows.extend(gap_rows)
 
         print(
             f"Fold {fold}: volumes={fold_row['n_volumes']} "
@@ -406,6 +452,9 @@ def main():
         oof_summary_rows,
         fieldnames=["metric", "mean", "std", "n_eyes"],
     )
+    if args.hole_decomposition:
+        all_gap_rows.sort(key=lambda r: (r["fold"], r["eye_id"], r["slice_idx"]))
+        write_csv(out_dir / "cv_gap_analysis_all_folds.csv", all_gap_rows)
 
     print(f"\n[Saved] fold summary -> {out_dir / 'cv_fold_summary.csv'}")
     print(f"[Saved] per-volume (all folds) -> {out_dir / 'cv_per_volume_all_folds.csv'}")
