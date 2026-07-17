@@ -30,7 +30,7 @@ from elm.transformation import ELM_transform
 from tensorboardX import SummaryWriter
 from elm.dataset import BasicDataset, make_2d_transforms
 from torch.utils.data import DataLoader, random_split
-from elm.dice_loss import dice_loss
+from elm.dice_loss import dice_loss, cldice_loss
 import torch.nn.functional as F
 from efficientunet import *
 import matplotlib.pyplot as plt
@@ -154,7 +154,9 @@ def train_net(net,
                 masks_pred = net(imgs)
                 out_new = torch.sigmoid(masks_pred)
 
-                loss = 0.5 * criterion(masks_pred, true_masks) + 0.5 * criterion_dice(out_new, true_masks)
+                loss = args.bce_weight * criterion(masks_pred, true_masks) + args.dice_weight * criterion_dice(out_new, true_masks)
+                if args.cldice_weight > 0:
+                    loss = loss + args.cldice_weight * cldice_loss(out_new, true_masks, iters=args.cldice_iters)
                 epoch_loss += float(loss.item())
 
                 optimizer.zero_grad()
@@ -237,6 +239,15 @@ def get_args():
                         help='Number of CV folds')
     parser.add_argument('--run-all-folds', action='store_true', default=True,
                         help='Run all folds sequentially')
+
+    parser.add_argument('--bce-weight', type=float, default=0.5,
+                        help='Weight of the BCE term in the training loss')
+    parser.add_argument('--dice-weight', type=float, default=0.5,
+                        help='Weight of the Dice term in the training loss')
+    parser.add_argument('--cldice-weight', type=float, default=0.0,
+                        help='Weight of the clDice term in the training loss (0 = disabled, opt-in)')
+    parser.add_argument('--cldice-iters', type=int, default=3,
+                        help='Number of soft-skeletonization iterations for the clDice term')
 
     return parser.parse_args()
 

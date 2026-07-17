@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from elm.dataset import D3Dataset
-from elm.dice_loss import dice_loss
+from elm.dice_loss import dice_loss, cldice_loss
 from elm.eval import eval_net
 from elm.model import (
     SwinUNETR3D,
@@ -238,9 +238,11 @@ def train_net(net, device, args):
 
                 masks_pred = net(imgs)
                 prob = torch.sigmoid(masks_pred)
-                loss = 0.5 * criterion_bce(masks_pred, true_masks) + 0.5 * dice_loss(
+                loss = args.bce_weight * criterion_bce(masks_pred, true_masks) + args.dice_weight * dice_loss(
                     prob, true_masks
                 )
+                if args.cldice_weight > 0:
+                    loss = loss + args.cldice_weight * cldice_loss(prob, true_masks, iters=args.cldice_iters)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -400,6 +402,22 @@ def get_args():
         type=str,
         default="./checkpoint/model_swinvit_UNETR.pt",
         help="Optional pretrained encoder weights for SwinUNETR3D",
+    )
+    parser.add_argument(
+        "--bce-weight", type=float, default=0.5,
+        help="Weight of the BCE term in the training loss",
+    )
+    parser.add_argument(
+        "--dice-weight", type=float, default=0.5,
+        help="Weight of the Dice term in the training loss",
+    )
+    parser.add_argument(
+        "--cldice-weight", type=float, default=0.0,
+        help="Weight of the clDice term in the training loss (0 = disabled, opt-in)",
+    )
+    parser.add_argument(
+        "--cldice-iters", type=int, default=3,
+        help="Number of soft-skeletonization iterations for the clDice term",
     )
     return parser.parse_args()
 
