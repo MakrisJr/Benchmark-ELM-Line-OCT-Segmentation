@@ -1,0 +1,46 @@
+{
+  "eyes": [
+    {
+      "tag": "worst1",
+      "eye_id": "945",
+      "slice_idx": 24,
+      "fold": 2,
+      "nnunet_2d_dice": 0.5876915926352372
+    },
+    {
+      "tag": "worst2",
+      "eye_id": "778",
+      "slice_idx": 24,
+      "fold": 1,
+      "nnunet_2d_dice": 0.6699407483994114
+    },
+    {
+      "tag": "median1",
+      "eye_id": "837",
+      "slice_idx": 24,
+      "fold": 1,
+      "nnunet_2d_dice": 0.7806445043093473
+    },
+    {
+      "tag": "median2",
+      "eye_id": "572",
+      "slice_idx": 24,
+      "fold": 0,
+      "nnunet_2d_dice": 0.7808233231782112
+    },
+    {
+      "tag": "best1",
+      "eye_id": "055",
+      "slice_idx": 24,
+      "fold": 2,
+      "nnunet_2d_dice": 0.8318384955980556
+    },
+    {
+      "tag": "best2",
+      "eye_id": "277",
+      "slice_idx": 24,
+      "fold": 1,
+      "nnunet_2d_dice": 0.8373580034818717
+    }
+  ]
+}

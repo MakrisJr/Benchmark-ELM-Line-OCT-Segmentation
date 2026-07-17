@@ -33,3 +33,4 @@ nnUNet_preprocessed/*
 .codex
 .CLAUDE.md
 nnUNet_results/*
+qualitative/images/*.png
