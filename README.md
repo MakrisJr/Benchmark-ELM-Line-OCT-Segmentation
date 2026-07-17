@@ -31,7 +31,7 @@ The codebase now supports two related workflows:
 Repository layout:
 
 - `elm/` contains the reusable package code such as datasets, models, evaluation helpers, losses, and transforms
-- top-level scripts such as `train.py`, `new-train.py`, `predict_cv2d.py`, and `predict_cv3d.py` remain as runnable entry points
+- top-level scripts such as `train2D.py`, `train3D.py`, `predict_cv2d.py`, and `predict_cv3d.py` remain as runnable entry points
 
 Common patterns used across the updated code:
 
@@ -83,7 +83,7 @@ from elm.eval import eval_net
 ### Training
 
 - `train.py`: 2D training with cross-validation support for models such as `SegNet`, `U_Net`, `R2U_Net`, `DeepLabv3_plus`, and `SwinEncoderUNet2D`
-- `new-train.py`: 3D training with 5-fold cross-validation for `UNet3D`, `UNet3D_Aniso`, `UNet3D_Aniso2`, `UNet3DFrawley`, `UNet2DEnc3DDec`, `CSAM_UNet2p5D`, `UNet2p5D_SlidingWindow`, and `SwinUNETR3D`
+- `train3D.py`: 3D training with 5-fold cross-validation for `UNet3D`, `UNet3D_Aniso`, `UNet3D_Aniso2`, `UNet3DFrawley`, `UNet2DEnc3DDec`, `CSAM_UNet2p5D`, `UNet2p5D_SlidingWindow`, and `SwinUNETR3D`
 
 ### Inference And Evaluation
 
@@ -130,7 +130,7 @@ python train.py --model SegNet --epochs 100
 ### 2. Train A 3D Model With Cross-Validation
 
 ```bash
-python new-train.py --model SwinUNETR3D --epochs 100
+python train3D.py --model SwinUNETR3D --epochs 100
 ```
 
 ### 3. Evaluate A 2D Cross-Validation Run
@@ -176,7 +176,7 @@ Cross-validation scripts also export CSV summaries such as:
 
 - The 2D workflow operates on individual slices and aggregates results per eye.
 - The 3D workflow operates on full reconstructed volumes, where one eye corresponds to one volume.
-- Due to the repo being work in progress, some historical scripts in the repository predate the metadata-based CV pipeline. For new experiments, prefer `train.py`, `new-train.py`, `predict_cv2d.py`, and `predict_cv3d.py`.
+- Due to the repo being work in progress, some historical scripts in the repository predate the metadata-based CV pipeline. For new experiments, prefer `train.py`, `train3D.py`, `predict_cv2d.py`, and `predict_cv3d.py`.
 - The dataset itself is not bundled here and is available on request from the corresponding author for non-commercial use.
 
 ## Citation

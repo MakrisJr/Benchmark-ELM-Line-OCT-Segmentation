@@ -17,8 +17,22 @@ conda activate elm-gpu
 
 python -c "import torch; print('torch', torch.__version__); print('cuda available', torch.cuda.is_available()); print('cuda device_count', torch.cuda.device_count())"
 
-# python train.py --model SwinEncoderUNet2D --epochs 100
-# python train.py --model R2U_Net --epochs 100
-# python train.py --model SegNet --epochs 100
-# python new-train.py --model SwinUNETR3D --epochs 100
-python new-train.py --model UNet2DEnc3DDec --epochs 100
+# python train.py --model SwinEncoderUNet2D --epochs 100 --run-all-folds
+# python train.py --model R2U_Net --epochs 100 --run-all-folds
+# python train.py --model SegNet --epochs 100 --run-all-folds
+# python train3D.py --model SwinUNETR3D --epochs 100 --run-all-folds
+# python train3D.py --model UNet2DEnc3DDec --epochs 100 --run-all-folds
+# python train3D.py --model UNet3DFrawley --epochs 100 --run-all-folds
+# python train3D.py --model CSAM_UNet2p5D --epochs 100 --run-all-folds
+# new 3D models:
+# python train3D.py --model UNet3D --epochs 100 --run-all-folds
+# python train3D.py --model UNet3D_Aniso --epochs 100 --run-all-folds
+# python train3D.py --model UNet3DFrawley --epochs 100 --run-all-folds
+
+python train3D.py --model UNet2p5D_SlidingWindow --window-k 7 --run-all-folds
+
+# submitted job 4165 for the 3 2D models
+# submitted job 6741 for the 4 3D models
+# submitted job 3500128 for the 3 new 3D models
+
+# 2.5D sliding window: job 3501176

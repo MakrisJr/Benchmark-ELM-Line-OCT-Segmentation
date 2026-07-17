@@ -19,7 +19,7 @@ rsync -a --info=progress2  $DATASET_DIR $SCRATCH_DIR
 trap 'echo "Syncing results back..."; rsync -av --progress $SCRATCH_DIR/elm-results/ $RESULTS_DIR/' EXIT
 
 # Run training
-python new-train.py \
+python train3D.py \
     --base_dir $SCRATCH_DIR
 
 

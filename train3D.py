@@ -3,7 +3,7 @@
 
 This combines:
 - the fold orchestration style from train.py
-- the 3D model and optimizer handling from the earlier new-train.py
+- the 3D model and optimizer handling from the earlier train3D.py
 - the metadata-based split logic used across the newer dataset code
 """
 
