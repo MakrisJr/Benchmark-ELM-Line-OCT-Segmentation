@@ -72,7 +72,7 @@ MODELS_3D = {
 }
 
 NNUNET_2D_EYE_DICE_CSV = (
-    BASE / "nnUNet_results/Dataset002_ELM3D/nnUNetTrainer__nnUNetResEncUNetMPlans__2d"
+    BASE / "nnunet/nnUNet_results/Dataset002_ELM3D/nnUNetTrainer__nnUNetResEncUNetMPlans__2d"
     "/cv_eval/cv_per_patient_all_folds.csv"
 )
 

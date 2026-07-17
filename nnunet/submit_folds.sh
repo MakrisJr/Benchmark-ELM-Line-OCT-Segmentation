@@ -5,7 +5,7 @@
 #
 # Requires nnunet/preprocess.sbatch to have completed first (raw + preprocessed
 # + splits_final.json for Dataset001_ELM2D / Dataset002_ELM3D), and that you've
-# checked nnUNet_preprocessed/Dataset002_ELM3D/nnUNetPlans.json to confirm
+# checked nnunet/nnUNet_preprocessed/Dataset002_ELM3D/nnUNetResEncUNetMPlans.json to confirm
 # nnU-Net planned 3d_fullres (not a 3d_lowres/3d_cascade_fullres pair) --
 # adjust the CONFIGURATION below if it did.
 #

@@ -7,7 +7,7 @@
 #
 # Requires nnunet/submit_folds.sh to have finished training every fold
 # (check with `squeue -u $USER` and that every
-# nnUNet_results/<dataset>/<trainer>__<plans>__<config>/fold_*/checkpoint_final.pth
+# nnunet/nnUNet_results/<dataset>/<trainer>__<plans>__<config>/fold_*/checkpoint_final.pth
 # exists).
 #
 # Usage: ./nnunet/submit_predictions.sh

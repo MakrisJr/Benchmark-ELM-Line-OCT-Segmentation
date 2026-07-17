@@ -4,7 +4,7 @@ Predict + score nnU-Net's 5-fold CV test splits.
 
 Runs, for one trained (dataset, configuration) combo, one nnUNetv2_predict
 call per fold -- using only that fold's model on that fold's held-out test
-cases (nnUNet_preprocessed/<dataset>/test_cases_per_fold.json) -- then scores
+cases (nnunet/nnUNet_preprocessed/<dataset>/test_cases_per_fold.json) -- then scores
 the predictions against labelsTr with the same metric set and per-eye
 aggregation as predict_cv2d.py / predict_cv3d.py, so nnU-Net's numbers plug
 directly into this repo's existing comparison tooling (compare_csvs.py,
@@ -56,6 +56,13 @@ from elm.metrics import (
     summarize_list,
     summarize_rows,
 )
+from elm.hole_metrics import (
+    analyze_slice,
+    analyze_slice_3d,
+    gap_result_to_row_fields,
+    summarize_gap_geometry,
+    summarize_spurious_gaps,
+)
 
 DATASET_NAMES = {1: "Dataset001_ELM2D", 2: "Dataset002_ELM3D"}
 
@@ -103,12 +110,14 @@ def run_prediction(images_tr, case_ids, file_ending, dataset_id, configuration,
     subprocess.run(cmd, check=True)
 
 
-def score_2d_fold(case_ids, pred_dir, labels_tr, file_ending, fold, tol):
+def score_2d_fold(case_ids, pred_dir, labels_tr, file_ending, fold, tol,
+                   hole_decomposition=False, min_gap_width=5):
     """Per-slice metrics + pooled per-eye aggregation, matching predict_cv2d.py."""
     slice_rows = []
     patient_agg = defaultdict(
         lambda: {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "rmse": [], "assd": [],
-                  "hd95": [], "bf1_tol2": [], "surf_dice_tol2": [], "n_slices": 0}
+                  "hd95": [], "bf1_tol2": [], "surf_dice_tol2": [], "n_slices": 0,
+                  "gap_geoms": [], "spurious_records": []}
     )
 
     for cid in case_ids:
@@ -125,18 +134,29 @@ def score_2d_fold(case_ids, pred_dir, labels_tr, file_ending, fold, tol):
         bf1 = boundary_f1_2d(pred01, gt01, tol=tol)
         sdice = surface_dice_2d(pred01, gt01, tol=tol)
 
-        slice_rows.append({
+        slice_row = {
             "fold": fold, "eye_id": pid, "slice_idx": int(slice_idx), "image_name": cid,
             "dice": dice, "iou": iou, "sen": sen, "fpr": fpr, "rmse": r,
             "assd": assd, "hd": hd, "hd95": hd95, "bf1_tol2": bf1, "surf_dice_tol2": sdice,
             "tp": tp, "fp": fp, "tn": tn, "fn": fn,
-        })
+        }
 
         pa = patient_agg[pid]
         pa["tp"] += tp; pa["fp"] += fp; pa["tn"] += tn; pa["fn"] += fn
         pa["rmse"].append(r); pa["assd"].append(assd); pa["hd95"].append(hd95)
         pa["bf1_tol2"].append(bf1); pa["surf_dice_tol2"].append(sdice)
         pa["n_slices"] += 1
+
+        if hole_decomposition:
+            gap_r = analyze_slice(pred01, gt01, min_gap_width=min_gap_width)
+            slice_row.update(gap_result_to_row_fields(gap_r))
+            if gap_r is not None:
+                if gap_r["gt_has_gap"]:
+                    pa["gap_geoms"].append(gap_r)
+                else:
+                    pa["spurious_records"].append(gap_r)
+
+        slice_rows.append(slice_row)
 
     patient_rows = []
     for pid, pa in patient_agg.items():
@@ -146,19 +166,25 @@ def score_2d_fold(case_ids, pred_dir, labels_tr, file_ending, fold, tol):
         m_hd95, _ = summarize_list(pa["hd95"])
         m_bf1, _ = summarize_list(pa["bf1_tol2"])
         m_sdice, _ = summarize_list(pa["surf_dice_tol2"])
-        patient_rows.append({
+        patient_row = {
             "fold": fold, "eye_id": pid, "tp": pa["tp"], "fp": pa["fp"], "tn": pa["tn"], "fn": pa["fn"],
             "vol_dice_pooled": pdice, "vol_iou_pooled": piou, "vol_sen_pooled": psen, "vol_fpr_pooled": pfpr,
             "vol_rmse_mean": m_rmse, "vol_assd_mean": m_assd, "vol_hd95_mean": m_hd95,
             "vol_bf1_mean": m_bf1, "vol_sdice_mean": m_sdice, "n_slices": pa["n_slices"],
-        })
+        }
+        if hole_decomposition:
+            patient_row.update(summarize_gap_geometry(pa["gap_geoms"]))
+            patient_row.update(summarize_spurious_gaps(pa["spurious_records"]))
+        patient_rows.append(patient_row)
     patient_rows.sort(key=lambda r: r["eye_id"])
     return slice_rows, patient_rows
 
 
-def score_3d_fold(case_ids, pred_dir, labels_tr, file_ending, fold, tol, spacing):
+def score_3d_fold(case_ids, pred_dir, labels_tr, file_ending, fold, tol, spacing,
+                   hole_decomposition=False, min_gap_width=5):
     """Per-volume metrics, matching predict_cv3d.py."""
     volume_rows = []
+    gap_rows = []
     for cid in case_ids:
         pred_img = sitk.ReadImage(str(pred_dir / f"{cid}{file_ending}"))
         gt_img = sitk.ReadImage(str(labels_tr / f"{cid}{file_ending}"))
@@ -172,12 +198,26 @@ def score_3d_fold(case_ids, pred_dir, labels_tr, file_ending, fold, tol, spacing
         bf1 = boundary_f1_3d(pred01, gt01, tol_vox=tol, spacing=spacing)
         sdice = surface_dice_3d(pred01, gt01, tol_vox=tol, spacing=spacing)
 
-        volume_rows.append({
+        volume_row = {
             "fold": fold, "eye_id": cid, "dice": dice, "iou": iou, "sen": sen, "fpr": fpr,
             "rmse": r, "assd": assd, "hd": hd, "hd95": hd95, "bf1_tol2": bf1, "surf_dice_tol2": sdice,
             "tp": tp, "fp": fp, "tn": tn, "fn": fn,
             "depth": int(pred01.shape[0]), "height": int(pred01.shape[1]), "width": int(pred01.shape[2]),
-        })
+        }
+
+        if hole_decomposition:
+            records = analyze_slice_3d(pred01, gt01, min_gap_width=min_gap_width)
+            hole_recs = [g for _, g in records if g["gt_has_gap"]]
+            cont_recs = [g for _, g in records if not g["gt_has_gap"]]
+            volume_row.update(summarize_gap_geometry(hole_recs))
+            volume_row.update(summarize_spurious_gaps(cont_recs))
+            for slice_idx, g in records:
+                gap_rows.append({
+                    "fold": fold, "eye_id": cid, "slice_idx": slice_idx,
+                    **gap_result_to_row_fields(g),
+                })
+
+        volume_rows.append(volume_row)
 
     volume_rows.sort(key=lambda r: r["eye_id"])
     patient_rows = [{
@@ -186,8 +226,13 @@ def score_3d_fold(case_ids, pred_dir, labels_tr, file_ending, fold, tol, spacing
         "vol_rmse_mean": r["rmse"], "vol_assd_mean": r["assd"], "vol_hd_mean": r["hd"], "vol_hd95_mean": r["hd95"],
         "vol_bf1_mean": r["bf1_tol2"], "vol_sdice_mean": r["surf_dice_tol2"],
         "depth": r["depth"], "height": r["height"], "width": r["width"],
+        **({k: r[k] for k in (
+            "n_hole_slices", "n_bridged", "bridged_frac", "mean_width_error",
+            "mean_abs_width_error", "mean_left_margin_error", "mean_right_margin_error",
+            "n_continuous_slices", "n_spurious_gaps", "spurious_gap_frac", "mean_spurious_gap_width",
+        )} if hole_decomposition else {}),
     } for r in volume_rows]
-    return volume_rows, patient_rows
+    return volume_rows, patient_rows, gap_rows
 
 
 def main():
@@ -208,9 +253,26 @@ def main():
              "dataset's real acquisition spacing (0.029 0.00387 0.00547) for "
              "physically calibrated distances instead.",
     )
-    ap.add_argument("--out_dir", default=None, help="Default: <nnUNet_results model dir>/cv_eval")
+    ap.add_argument("--out_dir", default=None, help="Default: <nnunet/nnUNet_results model dir>/cv_eval")
     ap.add_argument("--keep_predictions", action="store_true",
                      help="Keep each fold's raw predicted segmentations under <out_dir>/fold_<k>_predictions")
+    ap.add_argument(
+        "--hole_decomposition", action="store_true",
+        help="On slices that cross the macular hole (an interior gap in the "
+             "annotated ELM line), compare the model's own predicted gap against "
+             "the GT gap: whether it bridged straight across (no gap at all), and "
+             "if not, how its width and margins (ELM termination points) compare. "
+             "On slices where the annotated line is continuous, also checks whether "
+             "the model predicts a spurious gap anyway (a false-positive hole). Adds "
+             "gap_* fields to the per-slice/per-volume and per-patient CSVs (plus a "
+             "dedicated gap-analysis CSV for the 3D/volume case).",
+    )
+    ap.add_argument(
+        "--min_gap_width", type=int, default=5,
+        help="Minimum run length (columns) of missing GT columns to count as a "
+             "hole, filtering out annotation jitter (only used with "
+             "--hole_decomposition).",
+    )
     args = ap.parse_args()
 
     for env_var in ("nnUNet_raw", "nnUNet_preprocessed", "nnUNet_results"):
@@ -234,7 +296,8 @@ def main():
         for e in json.loads((preprocessed_root / "test_cases_per_fold.json").read_text())
     }
 
-    out_dir = Path(args.out_dir) if args.out_dir else (model_root / "cv_eval")
+    default_dir_name = "cv_eval_hole" if args.hole_decomposition else "cv_eval"
+    out_dir = Path(args.out_dir) if args.out_dir else (model_root / default_dir_name)
     out_dir.mkdir(parents=True, exist_ok=True)
     spacing = tuple(args.spacing)
 
@@ -246,6 +309,7 @@ def main():
     fold_metric_means = defaultdict(list)
     all_patient_rows = []
     all_slice_rows = []
+    all_gap_rows = []
 
     for fold in tqdm(range(args.num_folds), desc="Folds"):
         case_ids = test_cases_per_fold[fold]
@@ -271,13 +335,22 @@ def main():
             )
 
             if is_2d_dataset:
-                slice_rows, patient_rows = score_2d_fold(case_ids, pred_dir, labels_tr, file_ending, fold, args.tol)
+                slice_rows, patient_rows = score_2d_fold(
+                    case_ids, pred_dir, labels_tr, file_ending, fold, args.tol,
+                    hole_decomposition=args.hole_decomposition, min_gap_width=args.min_gap_width,
+                )
                 all_slice_rows.extend(slice_rows)
                 write_csv(out_dir / f"fold_{fold}_per_slice.csv", slice_rows)
                 n_extra = {"n_slices": len(slice_rows)}
             else:
-                volume_rows, patient_rows = score_3d_fold(case_ids, pred_dir, labels_tr, file_ending, fold, args.tol, spacing)
+                volume_rows, patient_rows, gap_rows = score_3d_fold(
+                    case_ids, pred_dir, labels_tr, file_ending, fold, args.tol, spacing,
+                    hole_decomposition=args.hole_decomposition, min_gap_width=args.min_gap_width,
+                )
                 write_csv(out_dir / f"fold_{fold}_per_volume.csv", volume_rows)
+                if args.hole_decomposition:
+                    write_csv(out_dir / f"fold_{fold}_gap_analysis.csv", gap_rows)
+                    all_gap_rows.extend(gap_rows)
                 n_extra = {}
         finally:
             shutil.rmtree(tmp_in, ignore_errors=True)
@@ -333,6 +406,9 @@ def main():
     if is_2d_dataset:
         all_slice_rows.sort(key=lambda r: (r["fold"], r["eye_id"], r["slice_idx"]))
         write_csv(out_dir / "cv_per_slice_all_folds.csv", all_slice_rows)
+    elif args.hole_decomposition:
+        all_gap_rows.sort(key=lambda r: (r["fold"], r["eye_id"], r["slice_idx"]))
+        write_csv(out_dir / "cv_gap_analysis_all_folds.csv", all_gap_rows)
 
     print(f"\n[Saved] -> {out_dir}")
 

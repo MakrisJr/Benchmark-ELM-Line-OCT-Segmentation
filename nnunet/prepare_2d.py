@@ -28,7 +28,7 @@ def convert_mask(src: Path, dst: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", default="data_no_anomalies")
-    parser.add_argument("--nnunet-raw", default="nnUNet_raw")
+    parser.add_argument("--nnunet-raw", default="nnunet/nnUNet_raw")
     parser.add_argument("--dataset-name", default=DATASET_NAME)
     parser.add_argument(
         "--limit-patients",

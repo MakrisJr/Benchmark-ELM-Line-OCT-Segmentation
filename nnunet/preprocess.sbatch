@@ -35,7 +35,7 @@ nnUNetv2_plan_and_preprocess -d 2 --verify_dataset_integrity -np 8 -pl nnUNetPla
 # own rotating 5-fold split, so results are comparable to the other models.
 python nnunet/make_splits.py
 
-echo "Preprocessing done. Inspect nnUNet_preprocessed/Dataset00{1,2}_ELM*/nnUNetPlans.json"
+echo "Preprocessing done. Inspect nnunet/nnUNet_preprocessed/Dataset00{1,2}_ELM*/nnUNetResEncUNetMPlans.json"
 echo "before training -- check the planned 3d config (3d_fullres vs a"
 echo "3d_lowres/cascade) and patch size given the placeholder 1x1x1 spacing."
 

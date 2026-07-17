@@ -14,7 +14,7 @@ test_cases_per_fold.json next to the dataset so those held-out cases are
 easy to find later for nnUNetv2_predict + evaluation.
 
 Run this after nnunet/prepare_2d.py and nnunet/prepare_3d.py. It creates
-nnUNet_preprocessed/<dataset>/ if it doesn't exist yet, so it's fine to run
+nnunet/nnUNet_preprocessed/<dataset>/ if it doesn't exist yet, so it's fine to run
 either before or after nnUNetv2_plan_and_preprocess.
 """
 import argparse
@@ -48,7 +48,7 @@ def build_splits(meta: pd.DataFrame, mode: str):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", default="data_no_anomalies")
-    parser.add_argument("--nnunet-preprocessed", default="nnUNet_preprocessed")
+    parser.add_argument("--nnunet-preprocessed", default="nnunet/nnUNet_preprocessed")
     parser.add_argument("--dataset-2d", default="Dataset001_ELM2D")
     parser.add_argument("--dataset-3d", default="Dataset002_ELM3D")
     args = parser.parse_args()

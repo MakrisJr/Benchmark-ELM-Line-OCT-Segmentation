@@ -39,5 +39,5 @@ echo "Training dataset=${DATASET} configuration=${CONFIGURATION} fold=${FOLD} pl
 nnUNetv2_train "${DATASET}" "${CONFIGURATION}" "${FOLD}" -p "${PLANS}"
 
 # After training a fold, evaluate on that fold's held-out test cases (listed
-# in nnUNet_preprocessed/Dataset00{1,2}_ELM*/test_cases_per_fold.json) with
+# in nnunet/nnUNet_preprocessed/Dataset00{1,2}_ELM*/test_cases_per_fold.json) with
 # nnUNetv2_predict, then score against labelsTr with this repo's own metrics.
