@@ -53,7 +53,7 @@ def train_net(net,
 
     model_name = args.model_name
     base_dir = args.base_dir
-    data_root = os.path.join(base_dir, "data_no_anomalies")
+    data_root = os.path.join(base_dir, args.dataset_dir)
     dir_checkpoint = os.path.join(args.experiment_dir, 'checkpoints')
 
     transform_train = make_2d_transforms(train=True, out_size=(256, 256))
@@ -232,6 +232,14 @@ def get_args():
                         help='Downscaling factor of the images')
     parser.add_argument('-d', '--base-dir', dest='base_dir', type=str, default='./',
                         help='Base files directory')
+    parser.add_argument('--dataset-dir', dest='dataset_dir', type=str, default='data_no_anomalies',
+                        help='Dataset directory name under base-dir (e.g. data_no_anomalies, data_no_anomalous_slices)')
+    parser.add_argument('--run-name', dest='run_name', type=str, default=None,
+                        help='Name of the elm-results/ output dir for this run. Defaults to '
+                             '<model>_<timestamp>_model. The default timestamp only has minute '
+                             'resolution, so pass an explicit name when launching concurrent runs '
+                             'of the same model, both to avoid a collision and so a caller can know '
+                             'the output path up front instead of discovering it afterwards.')
 
     parser.add_argument('--fold', type=int, default=0,
                         help='Validation fold index (0..4)')
@@ -309,7 +317,7 @@ if __name__ == '__main__':
         net = build_model(args.model)
         net.to(device=device)
 
-        model_name = f'{args.model}_{timestamp}_model'
+        model_name = args.run_name or f'{args.model}_{timestamp}_model'
         experiment_dir = os.path.join(args.base_dir, 'elm-results', model_name, f'fold_{fold_idx}')
         os.makedirs(os.path.join(experiment_dir, 'checkpoints'), exist_ok=True)
         os.makedirs(os.path.join(experiment_dir, 'logs'), exist_ok=True)
@@ -349,7 +357,7 @@ if __name__ == '__main__':
                     "experiment_dir": exp_dir,
                 })
 
-            results_csv = os.path.join(args.base_dir, 'elm-results', f'cv_results_{timestamp}.csv')
+            results_csv = os.path.join(args.base_dir, 'elm-results', f'cv_results_{args.run_name or timestamp}.csv')
             os.makedirs(os.path.dirname(results_csv), exist_ok=True)
 
             with open(results_csv, 'w', newline='') as f:
