@@ -170,6 +170,8 @@ class BasicDataset(Dataset):
         metadata_filename="metadata.csv",
         image_ext=".png",      # change if your files are .jpg, .tif, etc.
         mask_ext=".png",
+        subset_frac=1.0,       # keep this fraction of PATIENTS (learning curves)
+        subset_seed=0,
     ):
         self.root_dir = Path(root_dir)
         self.image_dir = self.root_dir / image_dir
@@ -224,6 +226,27 @@ class BasicDataset(Dataset):
                     df = df[df["fold"] != fold].copy()
                 elif split == "val":
                     df = df[df["fold"] == fold].copy()
+
+        # Learning-curve subsetting. Subsample PATIENTS, never slices: 49 slices from
+        # one eye are near-duplicates, so dropping slices shrinks the count without
+        # shrinking the effective dataset, and the curve would come out flat for the
+        # wrong reason. The patient order is a seeded permutation that does not depend
+        # on subset_frac, so the subsets are nested (25% is a subset of 50% is a subset
+        # of 100%) and the curve measures data volume rather than which eyes you drew.
+        if subset_frac < 1.0:
+            if not 0.0 < subset_frac <= 1.0:
+                raise ValueError(f"subset_frac must be in (0, 1], got {subset_frac}")
+            pids = sorted(df["patient_id"].unique())
+            order = np.random.RandomState(subset_seed).permutation(len(pids))
+            k = max(1, int(round(subset_frac * len(pids))))
+            keep = {pids[i] for i in order[:k]}
+            df = df[df["patient_id"].isin(keep)].copy()
+            logging.info(
+                f"subset_frac={subset_frac} (seed {subset_seed}): keeping {k}/{len(pids)} "
+                f"{split} patients -- {','.join(sorted(keep))}"
+            )
+        self.subset_frac = subset_frac
+        self.subset_seed = subset_seed
 
         # Keep only patients that have both image and mask files
         valid_rows = []
@@ -330,9 +353,19 @@ class BasicDataset(Dataset):
         img = np.array(img)
         mask = np.array(mask).astype(np.uint8)
 
+        extra = {}
         if self.transform is not None:
             out = self.transform(image=img, mask=mask)
             img, mask = out["image"], out["mask"]
+            # The native-sizing transforms in elm/sizing.py also return a validity
+            # mask (0 where the pixel is padding) and the pre-padding size. Both must
+            # reach the training loop and the metric code, or padded regions get
+            # scored as if they were retina.
+            if "valid" in out:
+                v = out["valid"]
+                extra["valid"] = v.unsqueeze(0) if v.ndim == 2 else v
+            if "orig_size" in out:
+                extra["orig_h"], extra["orig_w"] = int(out["orig_size"][0]), int(out["orig_size"][1])
         else:
             # Manual conversion if no transform is provided
             if img.ndim == 2:
@@ -356,6 +389,7 @@ class BasicDataset(Dataset):
             "slice_idx": slice_idx,
             "image": img,
             "mask": mask,
+            **extra,
         }
     
 """
