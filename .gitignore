@@ -34,3 +34,16 @@ nnunet/nnUNet_preprocessed/*
 .CLAUDE.md
 nnunet/nnUNet_results/*
 qualitative/images/*.png
+data_no_anomalous_slices/
+data_no_anomalous_slices_152/
+
+# External-validation data. dataset_zhao/ is the downloaded Zhao et al. 2026 release (559 MB of
+# TIFFs); data_zhao/ is regenerated from it by prepare_zhao_external.py, so neither belongs in git.
+# The converted masks and index CSV are cheap to rebuild and would otherwise be a second copy of
+# someone else's dataset under a CC licence.
+dataset_zhao/baseline/
+dataset_zhao/*.pdf
+data_zhao/
+data_zhao_noverlay/
+data_zhao_noverlay_clean/
+csvs/*.csv
