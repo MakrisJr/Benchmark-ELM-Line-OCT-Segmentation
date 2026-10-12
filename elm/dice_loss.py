@@ -111,3 +111,34 @@ def cldice_loss(pred, gt, iters=3, smooth=1.0):
     tprec = (torch.sum(skel_pred * gt) + smooth) / (torch.sum(skel_pred) + smooth)
     tsens = (torch.sum(skel_gt * pred) + smooth) / (torch.sum(skel_gt) + smooth)
     return 1 - 2.0 * (tprec * tsens) / (tprec + tsens)
+
+
+def apply_valid_mask(prob, gt, valid=None):
+    """Zero out padded pixels in both prediction and target.
+
+    The native-sizing policy (elm/sizing.py) pads images that are smaller than the
+    training crop rather than upscaling them. Padding is not retina, so it must not
+    contribute to the loss: zeroing the prediction there removes it from both the
+    intersection and the denominator of the Dice term, and the target is already 0.
+    """
+    if valid is None:
+        return prob, gt
+    v = valid.to(prob.dtype)
+    if v.ndim == prob.ndim - 1:
+        v = v.unsqueeze(1)
+    return prob * v, gt * v
+
+
+def masked_bce_with_logits(logits, gt, valid=None):
+    """BCE averaged over valid pixels only.
+
+    Averaging over the padded canvas instead would make the loss depend on how much
+    padding a sample happened to need, which varies by cohort in this dataset.
+    """
+    per_px = F.binary_cross_entropy_with_logits(logits, gt, reduction="none")
+    if valid is None:
+        return per_px.mean()
+    v = valid.to(per_px.dtype)
+    if v.ndim == per_px.ndim - 1:
+        v = v.unsqueeze(1)
+    return (per_px * v).sum() / v.expand_as(per_px).sum().clamp(min=1.0)

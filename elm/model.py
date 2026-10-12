@@ -9,6 +9,8 @@ from torchvision import models
 import timm
 from monai.networks.nets import SwinUNETR
 
+from .retfound import RETFoundSeg2D, param_groups_llrd
+
 
 def init_weights(net, init_type='normal', gain=0.02):
     def init_func(m):
