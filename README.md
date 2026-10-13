@@ -1,4 +1,5 @@
 # Benchmark ELM Line OCT Dataset
+## Note: This project is Work In Progress. Some scripts might not be working in the current published state  
 
 Benchmarking automated detection of the retinal External Limiting Membrane (ELM) in 3D spectral-domain OCT volumes of full-thickness macular holes.
 
