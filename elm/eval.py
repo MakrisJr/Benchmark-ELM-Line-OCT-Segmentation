@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from .dice_loss import dice_coeff, dice_loss, dice_per_slice_mean
+from .dice_loss import apply_valid_mask, dice_coeff, dice_loss, dice_per_slice_mean
 
 
 def eval_net(net, loader, device):
@@ -21,12 +21,17 @@ def eval_net(net, loader, device):
             imgs, true_masks = batch['image'], batch['mask']
             imgs = imgs.to(device=device, dtype=torch.float32)
             true_masks = true_masks.to(device=device, dtype=mask_type)
+            # Present only under the native-sizing policy, where each image is padded
+            # to its own patch multiple. Scoring the padding would inflate Dice with
+            # true negatives that are not retina.
+            valid = batch['valid'].to(device=device) if 'valid' in batch else None
 
             with torch.no_grad():
                 mask_pred = net(imgs)
 
             pred = torch.sigmoid(mask_pred)
             pred = (pred > 0.5).float()
+            pred, true_masks = apply_valid_mask(pred, true_masks, valid)
             total_imgs += imgs.size(0)
             tot += dice_coeff(pred, true_masks).item() * imgs.size(0) # sum over batch
             pbar.update()

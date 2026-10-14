@@ -47,3 +47,8 @@ data_zhao/
 data_zhao_noverlay/
 data_zhao_noverlay_clean/
 csvs/*.csv
+*.png
+*.tex
+presentation/*
+paper/tables/
+paper/*md
