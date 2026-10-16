@@ -45,40 +45,40 @@ import torch
 
 import albumentations as A
 
-#: ImageNet statistics, matching every other 2D arm in the benchmark.
+# ImageNet statistics, matching every other 2D arm in the benchmark.
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
-#: Training crop, taken from nnU-Net's dataset fingerprint for this dataset.
-#:
-#: nnU-Net's experiment planner, run on Dataset001_ELM2D, derived
-#: ``patch_size=[384, 384]`` from a median image shape of 376x321. Adopting its
-#: answer rather than inventing one is the same move plan §3.4 already makes for
-#: spacing: a published, citable planner (Isensee et al., Nature Methods 2021)
-#: fixes the choice, and every arm then trains on the geometry nnU-Net gets, so
-#: nnU-Net cannot win on preprocessing.
-#:
-#: Why square and why 384, concretely. The plan's original 320x512 assumed a
-#: landscape B-scan, but the minimum width in this dataset is 321, so a 512-wide
-#: crop *pads* 54.5% of slices instead of cropping them -- and pads them
-#: unequally: 62.7% real pixels for the 376x321 cohort against 87.4% for the wide
-#: one. That is a 24.7-point cohort asymmetry in the input itself, along exactly
-#: the split §9.3 reports as a result. 384x384 pads more in total (81.2% real) but
-#: pads both cohorts almost equally -- 81.9% vs 80.5%, a 1.3-point gap -- which is
-#: the property that actually removes the confound.
-#:
-#: 384 is a multiple of both 16 and 32, so the patch-16 arms (RETFound, MedSAM) and
-#: the patch-32 arm (MIRAGE) share one crop. MIRAGE's token grid is then 12x12=144
-#: against its pretrained 256; that is a real cost, accepted because MIRAGE is a
-#: Claim B arm and cohort balance matters more than token count.
+# Training crop, taken from nnU-Net's dataset fingerprint for this dataset.
+#
+# nnU-Net's experiment planner, run on Dataset001_ELM2D, derived
+# ``patch_size=[384, 384]`` from a median image shape of 376x321. Adopting its
+# answer rather than inventing one is the same move plan §3.4 already makes for
+# spacing: a published, citable planner (Isensee et al., Nature Methods 2021)
+# fixes the choice, and every arm then trains on the geometry nnU-Net gets, so
+# nnU-Net cannot win on preprocessing.
+#
+# Why square and why 384, concretely. The plan's original 320x512 assumed a
+# landscape B-scan, but the minimum width in this dataset is 321, so a 512-wide
+# crop *pads* 54.5% of slices instead of cropping them -- and pads them
+# unequally: 62.7% real pixels for the 376x321 cohort against 87.4% for the wide
+# one. That is a 24.7-point cohort asymmetry in the input itself, along exactly
+# the split §9.3 reports as a result. 384x384 pads more in total (81.2% real) but
+# pads both cohorts almost equally -- 81.9% vs 80.5%, a 1.3-point gap -- which is
+# the property that actually removes the confound.
+#
+# 384 is a multiple of both 16 and 32, so the patch-16 arms (RETFound, MedSAM) and
+# the patch-32 arm (MIRAGE) share one crop. MIRAGE's token grid is then 12x12=144
+# against its pretrained 256; that is a real cost, accepted because MIRAGE is a
+# Claim B arm and cohort balance matters more than token count.
 NNUNET_FINGERPRINT_CROP = (384, 384)
 
-#: Square crops whose *cohort* padding gap stays negligible, for the §3.5
-#: resolution ablation: 0.0 / 1.8 / 1.3 points at 192 / 256 / 384. The absolute
-#: padding fraction necessarily rises with crop size (100% / 99.1% / 81.2% real),
-#: but the asymmetry between cohorts does not, so the ablation measures resolution
-#: rather than differential padding. 448 and 512 are excluded for that reason:
-#: their gaps are 12.6 and 18.7 points.
+# Square crops whose *cohort* padding gap stays negligible, for the §3.5
+# resolution ablation: 0.0 / 1.8 / 1.3 points at 192 / 256 / 384. The absolute
+# padding fraction necessarily rises with crop size (100% / 99.1% / 81.2% real),
+# but the asymmetry between cohorts does not, so the ablation measures resolution
+# rather than differential padding. 448 and 512 are excluded for that reason:
+# their gaps are 12.6 and 18.7 points.
 RESOLUTION_LADDER = ((192, 192), (256, 256), (384, 384))
 
 
